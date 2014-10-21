@@ -1,0 +1,6 @@
+id: kibana-service
+selector:
+  app: kibana-viewer
+containerPort: 80
+protocol: TCP
+port: 8090

@@ -1,0 +1,15 @@
+apiVersion: v1beta1
+kind: Pod
+id: kibana
+desiredState:
+  manifest:
+    version: v1beta1
+    id: kibana-server
+    containers:
+      - name: kibana-image
+        image: arcus/kibana
+        ports:
+          - name: kibana
+            containerPort: 80
+labels:
+  app: kibana-viewer

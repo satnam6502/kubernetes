@@ -1,0 +1,17 @@
+apiVersion: v1beta1
+kind: Pod
+id: go-webserver
+desiredState:
+  manifest:
+    version: v1beta1
+    id: go-ws
+    containers:
+      - name: go-hello-world-image
+        image: satnam6502/go-hello-world-webserver
+        command: [ /gopath/bin/go-webserver-helloworld ]
+        ports:
+          - name: go-ws
+            containerPort: 8080 
+labels:
+  app: go-ws
+

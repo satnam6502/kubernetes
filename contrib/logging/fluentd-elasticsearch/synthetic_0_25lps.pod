@@ -1,0 +1,13 @@
+id: synthetic-logger-0.25lps
+kind: Pod
+apiVersion: v1beta1
+desiredState:
+  manifest:
+    version: v1beta1
+    id: synth-logger-0.25lps
+    containers:
+      - name: synth-lgr
+        image: ubuntu
+        command: ["bash", "-c", "while true; do date --rfc-3339 ns; sleep 4; done"]
+labels:
+  name: synth-logging-source
