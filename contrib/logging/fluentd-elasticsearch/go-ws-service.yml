@@ -1,0 +1,9 @@
+apiVersion: v1beta1
+kind: Service
+id: go-webserver-service
+port: 8085
+containerPort: go-ws-port
+selector:
+  app: go-ws
+createExternalLoadBalancer: true
+ 
