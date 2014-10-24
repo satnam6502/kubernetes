@@ -17,7 +17,7 @@ RUN curl -O http://download.elasticsearch.org/kibana/kibana/kibana-3.1.1.tar.gz 
 
 RUN echo "daemon off;" >> /etc/nginx/nginx.conf
 
-ADD default /etc/nginx/sites-available/default
+# ADD default /etc/nginx/sites-available/default
 ADD run.sh /usr/local/bin/run.sh
 
 EXPOSE 80

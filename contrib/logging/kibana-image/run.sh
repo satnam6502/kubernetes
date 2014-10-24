@@ -15,14 +15,18 @@
 # limitations under the License.
 
 set | grep -i elastic
-#ES_HOST=${ES_HOST:-$ELASTICSEARCH_SERVICE_HOST}
+ES_HOST=${ES_HOST:-$ELASTICSEARCH_SERVICE_HOST}
 ES_HOST=${ES_HOST:-\"+window.location.hostname+\"}
 echo ES_HOST=$ES_HOST
-#ES_PORT=${ES_PORT:-$ELASTICSEARCH_SERVICE_PORT}
-ES_PORT=${ES_PORT:-9200}
+ES_PORT=${ES_PORT:-$ELASTICSEARCH_SERVICE_PORT}
+ES_PORT=${ES_PORT:-5601}
 echo ES_PORT=$ES_PORT
 ES_SCHEME=http
 echo ES_SCHEME=$ES_SCHEME
+PROXY_HOST=localhost
+echo PROXY_HOST=$PROXY_HOST
+PROXY_PORT=9200
+echo PROXY_PORT=$PROXY_PORT
 # Test the connection to Elasticsearch
 echo "Running curl http://${ES_HOST}:${ES_PORT}"
 curl http://${ES_HOST}:${ES_PORT}
@@ -108,6 +112,32 @@ function (Settings) {
     ]
   });
 });
+EOF
+
+cat <<EOF > /etc/nginx/sites-available/default
+server {
+	listen 80 default_server;
+	listen [::]:80 default_server ipv6only=on;
+
+	root /usr/share/nginx/html;
+	index index.html index.htm;
+
+	# Make site accessible from http://localhost/
+	server_name localhost;
+
+        location ~ /elasticsearch/(.*) {
+                #rewrite ^/elasticsearch/(.*) \$1 break;
+                proxy_pass http://127.0.0.1:9200/\$1;
+	}
+
+	location / {
+		# First attempt to serve request as file, then
+		# as directory, then fall back to displaying a 404.
+		try_files $uri $uri/ =404;
+		# Uncomment to enable naxsi on this location
+		# include /etc/nginx/naxsi.rules
+	}
+}
 EOF
 
 nginx -c /etc/nginx/nginx.conf "$@"
