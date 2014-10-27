@@ -1,6 +1,6 @@
 build:	
-	sudo docker build -t kubernetes/kibana .
+	docker build -t kubernetes/kibana .
 
 
 push:	
-	sudo docker push kubernetes/kibana
+	docker push kubernetes/kibana

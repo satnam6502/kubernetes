@@ -125,15 +125,15 @@ server {
 	# Make site accessible from http://localhost/
 	server_name localhost;
 
-        location ~ /elasticsearch/(.*) {
-                #rewrite ^/elasticsearch/(.*) \$1 break;
-                proxy_pass http://127.0.0.1:9200/\$1;
-	}
+#        location ~ /elasticsearch/(.*) {
+#                #rewrite ^/elasticsearch/(.*) \$1 break;
+#                proxy_pass http://127.0.0.1:9200/\$1;
+#	}
 
 	location / {
 		# First attempt to serve request as file, then
 		# as directory, then fall back to displaying a 404.
-		try_files $uri $uri/ =404;
+		try_files \$uri \$uri/ =404;
 		# Uncomment to enable naxsi on this location
 		# include /etc/nginx/naxsi.rules
 	}
