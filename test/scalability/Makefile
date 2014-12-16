@@ -1,6 +1,7 @@
 API_SERVER=146.148.79.36
 SIZE=10
 NAME=wombat
+KUBECTL=../../cluster/kubectl.sh
 
 all:	
 	cd createpods; go build
@@ -18,4 +19,4 @@ delete:
 	deletepods/deletepods --api_server=$(API_SERVER)
 
 get:	
-	kubectl.sh get pods
+	$(KUBECTL) get pods
