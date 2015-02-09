@@ -16,6 +16,10 @@
 
 # TODO(jbeda): Provide a way to override project
 # gcloud multiplexing for shared GCE/GKE tests.
+KUBE_GCE_INSTANCE_PREFIX=k100
+PROJECT=kubernetes-scale
+KUBE_GCE_ZONE=asia-east1-b
+NUM_MINIONS=100
 GCLOUD=gcloud
 ZONE=${KUBE_GCE_ZONE:-us-central1-b}
 MASTER_SIZE=n1-standard-1
