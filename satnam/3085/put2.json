@@ -1,0 +1,21 @@
+{
+  "kind": "Service",
+  "id": "redis-master",
+  "uid": "3e74eb74-c83d-11e4-940d-42010af01a1f",
+  "creationTimestamp": "2015-03-11T22:23:29Z",
+  "selfLink": "/api/v1beta1/services/redis-master?namespace=default",
+  "resourceVersion": 1256,
+  "apiVersion": "v1beta1",
+  "namespace": "default",
+  "port": 6379,
+  "protocol": "TCP",
+  "labels": {
+    "name": "redis-master"
+  },
+  "selector": {
+    "name": "redis-master"
+  },
+  "containerPort": 6502,
+  "portalIP": "10.0.214.136",
+  "sessionAffinity": "None"
+}
