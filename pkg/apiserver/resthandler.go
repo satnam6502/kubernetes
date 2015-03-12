@@ -26,12 +26,13 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/admission"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 
 	"github.com/emicklei/go-restful"
-	"github.com/evanphx/json-patch"
+	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/golang/glog"
 )
 
@@ -286,12 +287,28 @@ func UpdateResource(r RESTUpdater, ctxFn ContextFunc, namer ScopeNamer, codec ru
 			errorJSON(err, codec, w)
 			return
 		}
+		glog.Infof("putver: body: %v", string(body))
 
 		obj := r.New()
 		if err := codec.DecodeInto(body, obj); err != nil {
-			err = transformDecodeError(typer, err, obj, body)
 			errorJSON(err, codec, w)
 			return
+		}
+		glog.Infof("putver: obj: %+v of type %T", obj, obj)
+		ra := meta.NewAccessor()
+		rv, err := ra.ResourceVersion(obj)
+		if err != nil {
+			glog.Infof("putver: Failed to find resource version in %+v: error %v", obj, err)
+			writeJSON(http.StatusInternalServerError, codec, w)
+			errorJSON(fmt.Errorf("Internal error: failed to extract ResourceVersion from %+v", body), codec, w)
+			return
+		} else {
+			if rv == "" {
+				glog.Info("putver: No resource version")
+				writeJSON(http.StatusBadRequest, codec, w)
+				errorJSON(fmt.Errorf("No resource version supplied in PUT request"), codec, w)
+				return
+			}
 		}
 
 		if err := checkName(obj, name, namespace, namer); err != nil {
