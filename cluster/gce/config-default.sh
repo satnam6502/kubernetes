@@ -17,6 +17,7 @@
 # TODO(jbeda): Provide a way to override project
 # gcloud multiplexing for shared GCE/GKE tests.
 GCLOUD=gcloud
+PROJECT=kubernetes-logging
 ZONE=${KUBE_GCE_ZONE:-us-central1-b}
 MASTER_SIZE=${MASTER_SIZE:-n1-standard-1}
 MINION_SIZE=${MINION_SIZE:-n1-standard-1}
@@ -95,7 +96,7 @@ ENABLE_CLUSTER_MONITORING="${KUBE_ENABLE_CLUSTER_MONITORING:-true}"
 
 # Optional: Enable node logging.
 ENABLE_NODE_LOGGING="${KUBE_ENABLE_NODE_LOGGING:-true}"
-LOGGING_DESTINATION="${KUBE_LOGGING_DESTINATION:-elasticsearch}" # options: elasticsearch, gcp
+LOGGING_DESTINATION="${KUBE_LOGGING_DESTINATION:-gcp}" # options: elasticsearch, gcp
 
 # Optional: When set to true, Elasticsearch and Kibana will be setup as part of the cluster bring up.
 ENABLE_CLUSTER_LOGGING="${KUBE_ENABLE_CLUSTER_LOGGING:-true}"
