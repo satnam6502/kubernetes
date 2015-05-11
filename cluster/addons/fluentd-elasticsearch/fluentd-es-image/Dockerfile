@@ -36,6 +36,9 @@ RUN /usr/sbin/td-agent-gem install fluent-plugin-elasticsearch
 # Install the record reformer plugin.
 RUN /usr/sbin/td-agent-gem install fluent-plugin-record-reformer
 
+# Install the Kubernetes metadata filter.
+RUN /usr/sbin/td-agent-gem install fluent-plugin-kubernetes_metadata_filter
+
 # Copy the Fluentd configuration file.
 COPY td-agent.conf /etc/td-agent/td-agent.conf
 
