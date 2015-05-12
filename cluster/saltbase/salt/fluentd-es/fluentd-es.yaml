@@ -8,7 +8,7 @@ spec:
     image: gcr.io/google_containers/fluentd-elasticsearch:1.6
     env:
     - name: "FLUENTD_ARGS"
-      value: "-qq"
+      value: "-vv"
     volumeMounts:
     - name: varlog
       mountPath: /varlog

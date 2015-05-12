@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND noninteractive
 # Install prerequisites.
 RUN apt-get update && \
     apt-get install -y curl && \
-    apt-get install -y -q libcurl4-openssl-dev make && \
+    apt-get install -y -q libcurl4-openssl-dev make ruby2.0 ruby2.0-dev build-essential && \
     apt-get clean
 
 # Install Fluentd.
@@ -43,4 +43,5 @@ RUN /usr/sbin/td-agent-gem install fluent-plugin-kubernetes_metadata_filter
 COPY td-agent.conf /etc/td-agent/td-agent.conf
 
 # Run the Fluentd service.
-CMD /usr/sbin/td-agent "$FLUENTD_ARGS" > /var/log/td-agent/td-agent.log
+COPY run.sh /run.sh
+CMD ["/run.sh"]
