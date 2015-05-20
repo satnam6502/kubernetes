@@ -1,0 +1,20 @@
+apiVersion: v1beta3
+kind: Service
+metadata:
+  name: mytunes
+  namespace: mytunes
+  labels:
+    app: mytunes
+spec:
+  selector:
+    app: mytunes
+  ports:
+  - name: db
+    port: 9200
+    targetPort: es
+  - name: ui
+    port: 5601
+    targetPort: kibana
+  type: LoadBalancer
+  createExternalLoadBalancer: true
+

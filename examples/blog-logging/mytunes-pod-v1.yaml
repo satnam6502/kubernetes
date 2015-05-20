@@ -1,0 +1,21 @@
+apiVersion: v1beta3
+kind: Pod
+metadata:
+  name: mytunes-v1
+  namespace: mytunes
+  labels:
+    app: mytunes
+    version: v1
+spec:
+  containers:
+  - name: elasticsearch
+    image: elasticsearch
+    ports:
+    - name: es
+      containerPort: 9200
+  - name: kibana
+    image: satnam6502/kibana
+    ports:
+    - name: kibana
+      containerPort: 5601
+
