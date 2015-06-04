@@ -22,6 +22,17 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/cluster/aws/${KUBE_CONFIG_FILE-"config-default.sh"}"
 source "${KUBE_ROOT}/cluster/common.sh"
 
+case "${KUBE_OS_DISTRIBUTION}" in
+  ubuntu|coreos)
+    echo "Starting cluster using os distro: ${KUBE_OS_DISTRIBUTION}" >&2
+    source "${KUBE_ROOT}/cluster/aws/${KUBE_OS_DISTRIBUTION}/util.sh"
+    ;;
+  *)
+    echo "Cannot start cluster using os distro: ${KUBE_OS_DISTRIBUTION}" >&2
+    exit 2
+    ;;
+esac
+
 # This removes the final character in bash (somehow)
 AWS_REGION=${ZONE%?}
 
@@ -259,6 +270,23 @@ function upload-server-tars() {
     # We default to us-east-1 because that's the canonical region for S3,
     # and then the bucket is most-simply named (s3.amazonaws.com)
     aws s3 mb "s3://${AWS_S3_BUCKET}" --region ${AWS_S3_REGION}
+
+    local attempt=0
+    while true; do
+      if ! aws s3 ls "s3://${AWS_S3_BUCKET}" > /dev/null 2>&1; then
+        if (( attempt > 5 )); then
+          echo
+          echo -e "${color_red}Unable to confirm bucket creation." >&2
+          echo "Please ensure that s3://${AWS_S3_BUCKET} exists" >&2
+          echo -e "and run the script again. (sorry!)${color_norm}" >&2
+          exit 1
+        fi
+      else
+        break
+      fi
+      attempt=$(($attempt+1))
+      sleep 1
+    done
   fi
 
   local s3_bucket_location=$(aws --output text s3api get-bucket-location --bucket ${AWS_S3_BUCKET})
@@ -270,15 +298,20 @@ function upload-server-tars() {
 
   local -r staging_path="devel"
 
-  echo "+++ Staging server tars to S3 Storage: ${AWS_S3_BUCKET}/${staging_path}"
+  local -r local_dir="${KUBE_TEMP}/s3/"
+  mkdir ${local_dir}
 
+  echo "+++ Staging server tars to S3 Storage: ${AWS_S3_BUCKET}/${staging_path}"
   local server_binary_path="${staging_path}/${SERVER_BINARY_TAR##*/}"
-  aws s3 cp "${SERVER_BINARY_TAR}" "s3://${AWS_S3_BUCKET}/${server_binary_path}"
+  cp -a "${SERVER_BINARY_TAR}" ${local_dir}
+  cp -a "${SALT_TAR}" ${local_dir}
+
+  aws s3 sync --exact-timestamps ${local_dir} "s3://${AWS_S3_BUCKET}/${staging_path}/"
+
   aws s3api put-object-acl --bucket ${AWS_S3_BUCKET} --key "${server_binary_path}" --grant-read 'uri="http://acs.amazonaws.com/groups/global/AllUsers"'
   SERVER_BINARY_TAR_URL="${s3_url_base}/${AWS_S3_BUCKET}/${server_binary_path}"
 
   local salt_tar_path="${staging_path}/${SALT_TAR##*/}"
-  aws s3 cp "${SALT_TAR}" "s3://${AWS_S3_BUCKET}/${salt_tar_path}"
   aws s3api put-object-acl --bucket ${AWS_S3_BUCKET} --key "${salt_tar_path}" --grant-read 'uri="http://acs.amazonaws.com/groups/global/AllUsers"'
   SALT_TAR_URL="${s3_url_base}/${AWS_S3_BUCKET}/${salt_tar_path}"
 }
@@ -406,10 +439,16 @@ function assign-elastic-ip {
 
 
 function kube-up {
+  get-tokens
+
+  detect-image
+  detect-minion-image
+
   find-release-tars
-  upload-server-tars
 
   ensure-temp-dir
+
+  upload-server-tars
 
   ensure-iam-profiles
 
@@ -418,8 +457,6 @@ function kube-up {
   if [[ ! -f "$AWS_SSH_KEY" ]]; then
     ssh-keygen -f "$AWS_SSH_KEY" -N ''
   fi
-
-  detect-image
 
   $AWS_CMD import-key-pair --key-name kubernetes --public-key-material "file://$AWS_SSH_KEY.pub" > $LOG 2>&1 || true
 
@@ -479,7 +516,6 @@ function kube-up {
 	  SEC_GROUP_ID=$($AWS_CMD create-security-group --group-name kubernetes-sec-group --description kubernetes-sec-group --vpc-id $VPC_ID | json_val '["GroupId"]')
 	  $AWS_CMD authorize-security-group-ingress --group-id $SEC_GROUP_ID --protocol -1 --port all --cidr 0.0.0.0/0 > $LOG
   fi
-
   (
     # We pipe this to the ami as a startup script in the user-data field.  Requires a compatible ami
     echo "#! /bin/bash"
@@ -493,8 +529,8 @@ function kube-up {
     echo "readonly ZONE='${ZONE}'"
     echo "readonly KUBE_USER='${KUBE_USER}'"
     echo "readonly KUBE_PASSWORD='${KUBE_PASSWORD}'"
-    echo "readonly PORTAL_NET='${PORTAL_NET}'"
-    echo "readonly ENABLE_CLUSTER_MONITORING='${ENABLE_CLUSTER_MONITORING:-false}'"
+    echo "readonly SERVICE_CLUSTER_IP_RANGE='${SERVICE_CLUSTER_IP_RANGE}'"
+    echo "readonly ENABLE_CLUSTER_MONITORING='${ENABLE_CLUSTER_MONITORING:-none}'"
     echo "readonly ENABLE_NODE_MONITORING='${ENABLE_NODE_MONITORING:-false}'"
     echo "readonly ENABLE_CLUSTER_LOGGING='${ENABLE_CLUSTER_LOGGING:-false}'"
     echo "readonly ENABLE_NODE_LOGGING='${ENABLE_NODE_LOGGING:-false}'"
@@ -506,6 +542,8 @@ function kube-up {
     echo "readonly DNS_DOMAIN='${DNS_DOMAIN:-}'"
     echo "readonly ADMISSION_CONTROL='${ADMISSION_CONTROL:-}'"
     echo "readonly MASTER_IP_RANGE='${MASTER_IP_RANGE:-}'"
+    echo "readonly KUBELET_TOKEN='${KUBELET_TOKEN}'"
+    echo "readonly KUBE_PROXY_TOKEN='${KUBE_PROXY_TOKEN}'"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/common.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/format-disks.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/create-dynamic-salt-files.sh"
@@ -586,16 +624,7 @@ function kube-up {
   MINION_IDS=()
   for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     echo "Starting Minion (${MINION_NAMES[$i]})"
-    (
-      # We pipe this to the ami as a startup script in the user-data field.  Requires a compatible ami
-      echo "#! /bin/bash"
-      echo "SALT_MASTER='${MASTER_INTERNAL_IP}'"
-      echo "MINION_IP_RANGE='${MINION_IP_RANGES[$i]}'"
-      echo "DOCKER_OPTS='${EXTRA_DOCKER_OPTS:-}'"
-      grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/common.sh"
-      grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/format-disks.sh"
-      grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/salt-minion.sh"
-    ) > "${KUBE_TEMP}/minion-start-${i}.sh"
+    generate-minion-user-data $i > "${KUBE_TEMP}/minion-user-data-${i}"
 
     local public_ip_option
     if [[ "${ENABLE_MINION_PUBLIC_IP}" == "true" ]]; then
@@ -605,7 +634,7 @@ function kube-up {
     fi
 
     minion_id=$($AWS_CMD run-instances \
-      --image-id $AWS_IMAGE \
+      --image-id $KUBE_MINION_IMAGE \
       --iam-instance-profile Name=$IAM_PROFILE_MINION \
       --instance-type $MINION_SIZE \
       --subnet-id $SUBNET_ID \
@@ -613,7 +642,7 @@ function kube-up {
       --key-name kubernetes \
       --security-group-ids $SEC_GROUP_ID \
       ${public_ip_option} \
-      --user-data file://${KUBE_TEMP}/minion-start-${i}.sh | json_val '["Instances"][0]["InstanceId"]')
+      --user-data "file://${KUBE_TEMP}/minion-user-data-${i}" | json_val '["Instances"][0]["InstanceId"]')
 
     add-tag $minion_id Name ${MINION_NAMES[$i]}
     add-tag $minion_id Role $MINION_TAG
@@ -709,31 +738,19 @@ function kube-up {
         local minion_name=${MINION_NAMES[$i]}
         local minion_ip=${KUBE_MINION_IP_ADDRESSES[$i]}
         echo -n Attempt "$(($attempt+1))" to check Docker on node "${minion_name} @ ${minion_ip}" ...
-        local output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@$minion_ip sudo docker ps -a 2>/dev/null)
-        if [[ -z "${output}" ]]; then
+        local output=`check-minion ${minion_name} ${minion_ip}`
+        echo $output
+        if [[ "${output}" != "working" ]]; then
           if (( attempt > 9 )); then
             echo
-            echo -e "${color_red}Docker failed to install on node ${minion_name}. Your cluster is unlikely" >&2
-            echo "to work correctly. Please run ./cluster/kube-down.sh and re-create the" >&2
+            echo -e "${color_red}Your cluster is unlikely to work correctly." >&2
+            echo "Please run ./cluster/kube-down.sh and re-create the" >&2
             echo -e "cluster. (sorry!)${color_norm}" >&2
             exit 1
           fi
-        # TODO: Reintroduce this (where does this container come from?)
-#        elif [[ "${output}" != *"kubernetes/pause"* ]]; then
-#          if (( attempt > 9 )); then
-#            echo
-#            echo -e "${color_red}Failed to observe kubernetes/pause on node ${minion_name}. Your cluster is unlikely" >&2
-#            echo "to work correctly. Please run ./cluster/kube-down.sh and re-create the" >&2
-#            echo -e "cluster. (sorry!)${color_norm}" >&2
-#            exit 1
-#          fi
         else
-          echo -e " ${color_green}[working]${color_norm}"
           break
         fi
-        echo -e " ${color_yellow}[not working yet]${color_norm}"
-        # Start Docker, in case it failed to start.
-        ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@$minion_ip sudo service docker start > $LOG 2>&1
         attempt=$(($attempt+1))
         sleep 30
       done
@@ -932,4 +949,9 @@ function prepare-e2e() {
   # (AWS runs detect-project, I don't think we need to anything)
   # Note: we can't print anything here, or else the test tools will break with the extra output
   return
+}
+
+function get-tokens() {
+  KUBELET_TOKEN=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
+  KUBE_PROXY_TOKEN=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
 }

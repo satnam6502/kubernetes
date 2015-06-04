@@ -33,7 +33,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("PD", func() {
+var _ = Describe("Pod Disks", func() {
 	var (
 		c         *client.Client
 		podClient client.PodInterface
@@ -263,7 +263,7 @@ func testPDPod(diskName, targetHost string, readOnly bool) *api.Pod {
 					},
 				},
 			},
-			Host: targetHost,
+			NodeName: targetHost,
 		},
 	}
 

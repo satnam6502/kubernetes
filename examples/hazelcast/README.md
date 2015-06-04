@@ -52,7 +52,7 @@ $ kubectl create -f hazelcast-service.yaml
 ```
 
 ### Adding replicated nodes
-The real power of Kubernetes and Hazelcast lies in easily building a replicated, resizable Hazelcast cluster.
+The real power of Kubernetes and Hazelcast lies in easily building a replicated, scalable Hazelcast cluster.
 
 In Kubernetes a _Replication Controller_ is responsible for replicating sets of identical pods.  Like a _Service_ it has a selector query which identifies the members of it's set.  Unlike a _Service_ it also has a desired number of replicas, and it will create or delete _Pods_ to ensure that the number of _Pods_ matches up with it's desired state.
 
@@ -129,9 +129,9 @@ You can see that the _Service_ has found the pod created by the replication cont
 
 Now it gets even more interesting.
 
-Let's resize our cluster to 2 pods:
+Let's scale our cluster to 2 pods:
 ```sh
-$ kubectl resize rc hazelcast --replicas=2
+$ kubectl scale rc hazelcast --replicas=2
 ```
 
 Now if you list the pods in your cluster, you should see two hazelcast pods:
@@ -141,7 +141,7 @@ $ kubectl get pods
 POD                 IP            CONTAINER(S)   IMAGE(S)              HOST                                 LABELS           STATUS    CREATED      MESSAGE
 hazelcast-pkyzd     10.244.90.3                                        e2e-test-minion-vj7k/104.197.8.214   name=hazelcast   Running   14 seconds
                                   hazelcast      pires/hazelcast-k8s:0.2                                                         Running   2 seconds
-hazelcast-ulkws     10.244.66.2                                        e2e-test-minion-2x1f/146.148.62.37   name=hazelcast   Running   7 seconds    
+hazelcast-ulkws     10.244.66.2                                        e2e-test-minion-2x1f/146.148.62.37   name=hazelcast   Running   7 seconds
                                   hazelcast      pires/hazelcast-k8s:0.2                                                         Running   6 seconds
 ```
 
@@ -175,9 +175,9 @@ Members [2] {
 2015-05-09 22:06:31.177  INFO 5 --- [           main] com.hazelcast.core.LifecycleService      : [10.244.66.2]:5701 [someGroup] [3.4.2] Address[10.244.66.2]:5701 is STARTED
 ```
 
-Now let's resize our cluster to 4 nodes:
+Now let's scale our cluster to 4 nodes:
 ```sh
-$ kubectl resize rc hazelcast --replicas=4
+$ kubectl scale rc hazelcast --replicas=4
 ```
 
 Examine the status again by checking a node’s log and you should see the 4 members connected.
@@ -193,142 +193,14 @@ kubectl create -f hazelcast-service.yaml
 kubectl create -f hazelcast-controller.yaml
 
 # scale up to 2 nodes
-kubectl resize rc hazelcast --replicas=2
+kubectl scale rc hazelcast --replicas=2
 
 # scale up to 4 nodes
-kubectl resize rc hazelcast --replicas=4
+kubectl scale rc hazelcast --replicas=4
 ```
 
 ### Hazelcast Discovery Source
 
-```java
-package com.github.pires.hazelcast;
-
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.hazelcast.config.Config;
-import com.hazelcast.config.GroupConfig;
-import com.hazelcast.config.JoinConfig;
-import com.hazelcast.config.MulticastConfig;
-import com.hazelcast.config.NetworkConfig;
-import com.hazelcast.config.SSLConfig;
-import com.hazelcast.config.TcpIpConfig;
-import com.hazelcast.core.Hazelcast;
-import java.io.IOException;
-import java.net.URL;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.CopyOnWriteArrayList;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.boot.CommandLineRunner;
-import org.springframework.stereotype.Controller;
-
-/**
- * Read from Kubernetes API all Hazelcast service bound pods, get their IP and connect to them.
- */
-@Controller
-public class HazelcastDiscoveryController implements CommandLineRunner {
-
-  private static final Logger log = LoggerFactory.getLogger(
-      HazelcastDiscoveryController.class);
-
-  @JsonIgnoreProperties(ignoreUnknown = true)
-  static class Address {
-
-    public String IP;
-  }
-
-  @JsonIgnoreProperties(ignoreUnknown = true)
-  static class Subset {
-
-    public List<Address> addresses;
-  }
-
-  @JsonIgnoreProperties(ignoreUnknown = true)
-  static class Endpoints {
-
-    public List<Subset> subsets;
-  }
-
-  private static String getEnvOrDefault(String var, String def) {
-    final String val = System.getenv(var);
-    return (val == null || val.isEmpty())
-        ? def
-        : val;
-  }
-
-  @Override
-  public void run(String... args) {
-    final String hostName = getEnvOrDefault("KUBERNETES_RO_SERVICE_HOST",
-        "localhost");
-    final String hostPort = getEnvOrDefault("KUBERNETES_RO_SERVICE_PORT",
-        "8080");
-    String serviceName = getEnvOrDefault("HAZELCAST_SERVICE", "hazelcast");
-    String path = "/api/v1beta3/namespaces/default/endpoints/";
-    final String host = "http://" + hostName + ":" + hostPort;
-    log.info("Asking k8s registry at {}..", host);
-
-    final List<String> hazelcastEndpoints = new CopyOnWriteArrayList<>();
-
-    try {
-      URL url = new URL(host + path + serviceName);
-      ObjectMapper mapper = new ObjectMapper();
-      Endpoints endpoints = mapper.readValue(url, Endpoints.class);
-      if (endpoints != null) {
-        if (endpoints.subsets != null && !endpoints.subsets.isEmpty()) {
-          endpoints.subsets.parallelStream().forEach(subset -> {
-            subset.addresses.parallelStream().forEach(
-                addr -> hazelcastEndpoints.add(addr.IP));
-          });
-        }
-      }
-    } catch (IOException ex) {
-      log.warn("Request to Kubernetes API failed", ex);
-    }
-
-    log.info("Found {} pods running Hazelcast.", hazelcastEndpoints.size());
-
-    runHazelcast(hazelcastEndpoints);
-  }
-
-  private void runHazelcast(final List<String> nodes) {
-    // configure Hazelcast instance
-    final Config cfg = new Config();
-    cfg.setInstanceName(UUID.randomUUID().toString());
-    // group configuration
-    final String HC_GROUP_NAME = getEnvOrDefault("HC_GROUP_NAME", "someGroup");
-    final String HC_GROUP_PASSWORD = getEnvOrDefault("HC_GROUP_PASSWORD",
-        "someSecret");
-    final int HC_PORT = Integer.parseInt(getEnvOrDefault("HC_PORT", "5701"));
-    cfg.setGroupConfig(new GroupConfig(HC_GROUP_NAME, HC_GROUP_PASSWORD));
-    // network configuration initialization
-    final NetworkConfig netCfg = new NetworkConfig();
-    netCfg.setPortAutoIncrement(false);
-    netCfg.setPort(HC_PORT);
-    // multicast
-    final MulticastConfig mcCfg = new MulticastConfig();
-    mcCfg.setEnabled(false);
-    // tcp
-    final TcpIpConfig tcpCfg = new TcpIpConfig();
-    nodes.parallelStream().forEach(tcpCfg::addMember);
-    tcpCfg.setEnabled(true);
-    // network join configuration
-    final JoinConfig joinCfg = new JoinConfig();
-    joinCfg.setMulticastConfig(mcCfg);
-    joinCfg.setTcpIpConfig(tcpCfg);
-    netCfg.setJoin(joinCfg);
-    // ssl
-    netCfg.setSSLConfig(new SSLConfig().setEnabled(false));
-    // set it all
-    cfg.setNetworkConfig(netCfg);
-    // run
-    Hazelcast.newHazelcastInstance(cfg);
-  }
-
-}
-
-```
-
+See [here](https://github.com/pires/hazelcast-kubernetes-bootstrapper/blob/master/src/main/java/com/github/pires/hazelcast/HazelcastDiscoveryController.java)
 
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/examples/hazelcast/README.md?pixel)]()

@@ -166,9 +166,6 @@ func validateSyncReplication(t *testing.T, fakePodControl *FakePodControl, expec
 }
 
 func replicationControllerResourceName() string {
-	if api.PreV1Beta3(testapi.Version()) {
-		return "replicationControllers"
-	}
 	return "replicationcontrollers"
 }
 
@@ -193,7 +190,7 @@ func makeTestServer(t *testing.T, namespace, name string, podResponse, controlle
 	mux := http.NewServeMux()
 	mux.Handle(testapi.ResourcePath("pods", namespace, ""), &fakePodHandler)
 	mux.Handle(testapi.ResourcePath(replicationControllerResourceName(), "", ""), &fakeControllerHandler)
-	if !api.PreV1Beta3(testapi.Version()) && namespace != "" {
+	if namespace != "" {
 		mux.Handle(testapi.ResourcePath(replicationControllerResourceName(), namespace, ""), &fakeControllerHandler)
 	}
 	if name != "" {
@@ -250,6 +247,38 @@ func TestSyncReplicationControllerDeletes(t *testing.T) {
 
 	manager.syncReplicationController(getKey(controllerSpec, t))
 	validateSyncReplication(t, &fakePodControl, 0, 1)
+}
+
+func TestDeleteFinalStateUnknown(t *testing.T) {
+	client := client.NewOrDie(&client.Config{Host: "", Version: testapi.Version()})
+	fakePodControl := FakePodControl{}
+	manager := NewReplicationManager(client, BurstReplicas)
+	manager.podControl = &fakePodControl
+
+	received := make(chan string)
+	manager.syncHandler = func(key string) error {
+		received <- key
+		return nil
+	}
+
+	// The DeletedFinalStateUnknown object should cause the rc manager to insert
+	// the controller matching the selectors of the deleted pod into the work queue.
+	controllerSpec := newReplicationController(1)
+	manager.controllerStore.Store.Add(controllerSpec)
+	pods := newPodList(nil, 1, api.PodRunning, controllerSpec)
+	manager.deletePod(cache.DeletedFinalStateUnknown{Key: "foo", Obj: &pods.Items[0]})
+
+	go manager.worker()
+
+	expected := getKey(controllerSpec, t)
+	select {
+	case key := <-received:
+		if key != expected {
+			t.Errorf("Unexpected sync all for rc %v, expected %v", key, expected)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Errorf("Processing DeleteFinalStateUnknown took longer than expected")
+	}
 }
 
 func TestSyncReplicationControllerCreates(t *testing.T) {
@@ -404,19 +433,19 @@ func TestSortingActivePods(t *testing.T) {
 		pods[i] = &podList.Items[i]
 	}
 	// pods[0] is not scheduled yet.
-	pods[0].Spec.Host = ""
+	pods[0].Spec.NodeName = ""
 	pods[0].Status.Phase = api.PodPending
 	// pods[1] is scheduled but pending.
-	pods[1].Spec.Host = "bar"
+	pods[1].Spec.NodeName = "bar"
 	pods[1].Status.Phase = api.PodPending
 	// pods[2] is unknown.
-	pods[2].Spec.Host = "foo"
+	pods[2].Spec.NodeName = "foo"
 	pods[2].Status.Phase = api.PodUnknown
 	// pods[3] is running but not ready.
-	pods[3].Spec.Host = "foo"
+	pods[3].Spec.NodeName = "foo"
 	pods[3].Status.Phase = api.PodRunning
 	// pods[4] is running and ready.
-	pods[4].Spec.Host = "foo"
+	pods[4].Spec.NodeName = "foo"
 	pods[4].Status.Phase = api.PodRunning
 	pods[4].Status.Conditions = []api.PodCondition{{Type: api.PodReady, Status: api.ConditionTrue}}
 
@@ -988,5 +1017,40 @@ func TestRCSyncExpectations(t *testing.T) {
 		},
 	}
 	manager.syncReplicationController(getKey(controllerSpec, t))
+	validateSyncReplication(t, &fakePodControl, 0, 0)
+}
+
+func TestDeleteControllerAndExpectations(t *testing.T) {
+	client := client.NewOrDie(&client.Config{Host: "", Version: testapi.Version()})
+	manager := NewReplicationManager(client, 10)
+
+	rc := newReplicationController(1)
+	manager.controllerStore.Store.Add(rc)
+
+	fakePodControl := FakePodControl{}
+	manager.podControl = &fakePodControl
+
+	// This should set expectations for the rc
+	manager.syncReplicationController(getKey(rc, t))
+	validateSyncReplication(t, &fakePodControl, 1, 0)
+	fakePodControl.clear()
+
+	// This is to simulate a concurrent addPod, that has a handle on the expectations
+	// as the controller deletes it.
+	podExp, exists, err := manager.expectations.GetExpectations(rc)
+	if !exists || err != nil {
+		t.Errorf("No expectations found for rc")
+	}
+	manager.controllerStore.Delete(rc)
+	manager.syncReplicationController(getKey(rc, t))
+
+	if _, exists, err = manager.expectations.GetExpectations(rc); exists {
+		t.Errorf("Found expectaions, expected none since the rc has been deleted.")
+	}
+
+	// This should have no effect, since we've deleted the rc.
+	podExp.Seen(1, 0)
+	manager.podStore.Store.Replace(make([]interface{}, 0))
+	manager.syncReplicationController(getKey(rc, t))
 	validateSyncReplication(t, &fakePodControl, 0, 0)
 }

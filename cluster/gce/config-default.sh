@@ -21,8 +21,8 @@ ZONE=${KUBE_GCE_ZONE:-us-central1-b}
 MASTER_SIZE=${MASTER_SIZE:-n1-standard-1}
 MINION_SIZE=${MINION_SIZE:-n1-standard-1}
 NUM_MINIONS=${NUM_MINIONS:-4}
-MASTER_DISK_TYPE=pd-standard
-MASTER_DISK_SIZE=${MASTER_DISK_SIZE:-100GB}
+MASTER_DISK_TYPE=pd-ssd
+MASTER_DISK_SIZE=${MASTER_DISK_SIZE:-20GB}
 MINION_DISK_TYPE=pd-standard
 MINION_DISK_SIZE=${MINION_DISK_SIZE:-100GB}
 
@@ -32,6 +32,7 @@ MASTER_IMAGE_PROJECT=${KUBE_GCE_MASTER_PROJECT:-google-containers}
 MINION_IMAGE=${KUBE_GCE_MINION_IMAGE:-container-vm-v20150505}
 MINION_IMAGE_PROJECT=${KUBE_GCE_MINION_PROJECT:-google-containers}
 CONTAINER_RUNTIME=${KUBE_CONTAINER_RUNTIME:-docker}
+RKT_VERSION=${KUBE_RKT_VERSION:-0.5.5}
 
 NETWORK=${KUBE_GCE_NETWORK:-default}
 INSTANCE_PREFIX="${KUBE_GCE_INSTANCE_PREFIX:-kubernetes}"
@@ -43,7 +44,7 @@ CLUSTER_IP_RANGE="${CLUSTER_IP_RANGE:-10.244.0.0/16}"
 MINION_SCOPES=("storage-ro" "compute-rw" "https://www.googleapis.com/auth/monitoring" "https://www.googleapis.com/auth/logging.write")
 # Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
 POLL_SLEEP_INTERVAL=3
-PORTAL_NET="10.0.0.0/16"
+SERVICE_CLUSTER_IP_RANGE="10.0.0.0/16"  # formerly PORTAL_NET
 ALLOCATE_NODE_CIDRS=true
 
 # When set to true, Docker Cache is enabled by default as part of the cluster bring up.
@@ -76,4 +77,4 @@ DNS_DOMAIN="cluster.local"
 DNS_REPLICAS=1
 
 # Admission Controllers to invoke prior to persisting objects in cluster
-ADMISSION_CONTROL=NamespaceLifecycle,NamespaceAutoProvision,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota
+ADMISSION_CONTROL=NamespaceLifecycle,NamespaceExists,LimitRanger,SecurityContextDeny,ServiceAccount,ResourceQuota

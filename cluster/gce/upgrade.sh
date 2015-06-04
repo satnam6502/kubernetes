@@ -22,12 +22,6 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-# VERSION_REGEX matches things like "v0.13.1"
-readonly VERSION_REGEX="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
-
-# CI_VERSION_REGEX matches things like "v0.14.1-341-ge0c9d9e"
-readonly CI_VERSION_REGEX="^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(.*)$"
-
 if [[ "${KUBERNETES_PROVIDER:-gce}" != "gce" ]]; then
   echo "!!! ${1} only works on GCE" >&2
   exit 1
@@ -40,7 +34,7 @@ source "${KUBE_ROOT}/cluster/${KUBERNETES_PROVIDER}/util.sh"
 function usage() {
   echo "!!! EXPERIMENTAL !!!"
   echo ""
-  echo "${0} [-M|-N] -l | <release or continuous integration version>"
+  echo "${0} [-M|-N] -l | <release or continuous integration version> | [latest_stable|latest_release|latest_ci]"
   echo "  Upgrades master and nodes by default"
   echo "  -M:  Upgrade master only"
   echo "  -N:  Upgrade nodes only"
@@ -66,9 +60,10 @@ function usage() {
 function upgrade-master() {
   echo "== Upgrading master to '${SERVER_BINARY_TAR_URL}'. Do not interrupt, deleting master instance. =="
 
-  detect-master
   get-password
-  set-master-htpasswd
+  get-bearer-token
+
+  detect-master
 
   # Delete the master instance. Note that the master-pd is created
   # with auto-delete=no, so it should not be deleted.
@@ -97,50 +92,70 @@ function wait-for-master() {
 # Perform common upgrade setup tasks
 #
 # Assumed vars
-#   local_binaries
-#   binary_version
+#   KUBE_VERSION
 function prepare-upgrade() {
   ensure-temp-dir
   detect-project
-
-  if [[ "${local_binaries}" == "true" ]]; then
-    find-release-tars
-    upload-server-tars
-  else
-    tars_from_version ${binary_version}
-  fi
+  tars_from_version
 }
 
+# Reads kube-env metadata from master and extracts value from provided key.
+#
+# Assumed vars:
+#   MASTER_NAME
+#   ZONE
+#
+# Args:
+# $1 env key to use
+function get-env-val() {
+  # TODO(mbforbes): Make this more reliable with retries.
+  gcloud compute ssh --zone ${ZONE} ${MASTER_NAME} --command \
+    "curl --fail --silent -H 'Metadata-Flavor: Google' \
+      'http://metadata/computeMetadata/v1/instance/attributes/kube-env'" 2>/dev/null \
+    | grep ${1} | cut -d : -f 2 | cut -d \' -f 2
+}
+
+# Assumed vars:
+#   KUBE_VERSION
+#   MINION_SCOPES
+#   NODE_INSTANCE_PREFIX
+#   PROJECT
+#   ZONE
 function upgrade-nodes() {
-  echo "== Upgrading nodes to ${SERVER_BINARY_TAR_URL}. =="
+  local sanitized_version=$(echo ${KUBE_VERSION} | sed s/"\."/-/g)
+  echo "== Upgrading nodes to ${KUBE_VERSION}. =="
 
   detect-minion-names
-  get-password
-  set-master-htpasswd
-  kube-update-nodes upgrade
-  echo "== Done =="
-}
 
-function tars_from_version() {
-  version=${1-}
-
-  if [[ ${version} =~ ${VERSION_REGEX} ]]; then
-    SERVER_BINARY_TAR_URL="https://storage.googleapis.com/kubernetes-release/release/${version}/kubernetes-server-linux-amd64.tar.gz"
-    SALT_TAR_URL="https://storage.googleapis.com/kubernetes-release/release/${version}/kubernetes-salt.tar.gz"
-  elif [[ ${version} =~ ${CI_VERSION_REGEX} ]]; then
-    SERVER_BINARY_TAR_URL="https://storage.googleapis.com/kubernetes-release/ci/${version}/kubernetes-server-linux-amd64.tar.gz"
-    SALT_TAR_URL="https://storage.googleapis.com/kubernetes-release/ci/${version}/kubernetes-salt.tar.gz"
+  # TODO(mbforbes): Refactor setting scope flags.
+  local -a scope_flags=()
+  if (( "${#MINION_SCOPES[@]}" > 0 )); then
+    scope_flags=("--scopes" "$(join_csv ${MINION_SCOPES[@]})")
   else
-    echo "!!! Version not provided or version doesn't match regexp" >&2
-    exit 1
+    scope_flags=("--no-scopes")
   fi
 
-  if ! curl -Ss --range 0-1 ${SERVER_BINARY_TAR_URL} >&/dev/null; then
-    echo "!!! Can't find release at ${SERVER_BINARY_TAR_URL}" >&2
-    exit 1
-  fi
+  # Get required node tokens.
+  KUBELET_TOKEN=$(get-env-val "KUBELET_TOKEN")
+  KUBE_PROXY_TOKEN=$(get-env-val "KUBE_PROXY_TOKEN")
 
-  echo "== Release ${version} validated =="
+  # TODO(mbforbes): How do we ensure kube-env is written in a ${version}-
+  #                 compatible way?
+  write-node-env
+  # TODO(mbforbes): Get configure-vm script from ${version}. (Must plumb this
+  #                 through all create-node-instance-template implementations).
+  create-node-instance-template ${sanitized_version}
+
+  # Do the actual upgrade.
+  gcloud preview rolling-updates start \
+      --group "${NODE_INSTANCE_PREFIX}-group" \
+      --max-num-concurrent-instances 1 \
+      --max-num-failed-instances 0 \
+      --project "${PROJECT}" \
+      --zone "${ZONE}" \
+      --template "${NODE_INSTANCE_PREFIX}-template-${sanitized_version}"
+
+  echo "== Done =="
 }
 
 master_upgrade=true
@@ -182,7 +197,7 @@ if [[ "${master_upgrade}" == "false" ]] && [[ "${node_upgrade}" == "false" ]]; t
 fi
 
 if [[ "${local_binaries}" == "false" ]]; then
-  binary_version=${1}
+  set_binary_version ${1}
 fi
 
 prepare-upgrade
@@ -192,7 +207,12 @@ if [[ "${master_upgrade}" == "true" ]]; then
 fi
 
 if [[ "${node_upgrade}" == "true" ]]; then
-  upgrade-nodes
+  if [[ "${local_binaries}" == "true" ]]; then
+    echo "Upgrading nodes to local binaries is not yet supported." >&2
+  else
+    upgrade-nodes
+  fi
 fi
 
+echo "== Validating cluster post-upgrade =="
 "${KUBE_ROOT}/cluster/validate-cluster.sh"

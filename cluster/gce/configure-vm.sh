@@ -50,6 +50,12 @@ function ensure-install-dir() {
   cd ${INSTALL_DIR}
 }
 
+function salt-apiserver-timeout-grain() {
+    cat <<EOF >>/etc/salt/minion.d/grains.conf
+  minRequestTimeout: '$1'
+EOF
+}
+
 function set-broken-motd() {
   echo -e '\nBroken (or in progress) GCE Kubernetes node setup! Suggested first step:\n  tail /var/log/startupscript.log\n' > /etc/motd
 }
@@ -77,13 +83,6 @@ import pipes,sys,yaml
 for k,v in yaml.load(sys.stdin).iteritems():
   print "readonly {var}={value}".format(var = k, value = pipes.quote(str(v)))
 ''' < "${kube_env_yaml}")
-
-  # Infer master status from hostname
-  if [[ $(hostname) == "${INSTANCE_PREFIX}-master" ]]; then
-    KUBERNETES_MASTER="true"
-  else
-    KUBERNETES_MASTER="false"
-  fi
 }
 
 function remove-docker-artifacts() {
@@ -250,7 +249,7 @@ instance_prefix: '$(echo "$INSTANCE_PREFIX" | sed -e "s/'/''/g")'
 node_instance_prefix: '$(echo "$NODE_INSTANCE_PREFIX" | sed -e "s/'/''/g")'
 cluster_cidr: '$(echo "$CLUSTER_IP_RANGE" | sed -e "s/'/''/g")'
 allocate_node_cidrs: '$(echo "$ALLOCATE_NODE_CIDRS" | sed -e "s/'/''/g")'
-portal_net: '$(echo "$PORTAL_NET" | sed -e "s/'/''/g")'
+service_cluster_ip_range: '$(echo "$SERVICE_CLUSTER_IP_RANGE" | sed -e "s/'/''/g")'
 enable_cluster_monitoring: '$(echo "$ENABLE_CLUSTER_MONITORING" | sed -e "s/'/''/g")'
 enable_node_monitoring: '$(echo "$ENABLE_NODE_MONITORING" | sed -e "s/'/''/g")'
 enable_cluster_logging: '$(echo "$ENABLE_CLUSTER_LOGGING" | sed -e "s/'/''/g")'
@@ -437,15 +436,23 @@ function download-release() {
   # store it when we download, and then when it's different infer that
   # a push occurred (otherwise it's a simple reboot).
 
-  echo "Downloading binary release tar ($SERVER_BINARY_TAR_URL)"
-  download-or-bust "$SERVER_BINARY_TAR_URL"
+  # In case of failure of unpacking Salt tree or checking integrity of
+  # binary release tar (the last command in the "until" block) retry
+  # downloading both release and Salt tars.
+  until
+    echo "Downloading binary release tar ($SERVER_BINARY_TAR_URL)"
+    download-or-bust "$SERVER_BINARY_TAR_URL"
 
-  echo "Downloading Salt tar ($SALT_TAR_URL)"
-  download-or-bust "$SALT_TAR_URL"
+    echo "Downloading Salt tar ($SALT_TAR_URL)"
+    download-or-bust "$SALT_TAR_URL"
 
-  echo "Unpacking Salt tree"
-  rm -rf kubernetes
-  tar xzf "${SALT_TAR_URL##*/}"
+    echo "Unpacking Salt tree and checking integrity of binary release tar"
+    rm -rf kubernetes
+    tar xzf "${SALT_TAR_URL##*/}" && tar tzf "${SERVER_BINARY_TAR_URL##*/}" > /dev/null
+  do
+    sleep 15
+    echo "Couldn't unpack Salt tree. Retrying..."
+  done
 
   echo "Running release install script"
   sudo kubernetes/saltbase/install.sh "${SERVER_BINARY_TAR_URL##*/}"
@@ -486,8 +493,10 @@ EOF
 token-url = ${TOKEN_URL}
 project-id = ${PROJECT_ID}
 EOF
+    EXTERNAL_IP=$(curl --fail --silent -H 'Metadata-Flavor: Google' "http://metadata/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip")
     cat <<EOF >>/etc/salt/minion.d/grains.conf
   cloud_config: /etc/gce.conf
+  advertise_address: '${EXTERNAL_IP}'
 EOF
   fi
 }
@@ -535,6 +544,9 @@ function configure-salt() {
   salt-run-local
   if [[ "${KUBERNETES_MASTER}" == "true" ]]; then
     salt-master-role
+    if [ -n "${KUBE_APISERVER_REQUEST_TIMEOUT:-}"  ]; then
+        salt-apiserver-timeout-grain $KUBE_APISERVER_REQUEST_TIMEOUT
+    fi
   else
     salt-node-role
     salt-docker-opts

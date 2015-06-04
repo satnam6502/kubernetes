@@ -106,8 +106,8 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 			j.Target.Name = c.RandString()
 		},
 		func(j *api.ReplicationControllerSpec, c fuzz.Continue) {
-			c.FuzzNoCustom(j)   // fuzz self without calling this function again
-			j.TemplateRef = nil // this is required for round trip
+			c.FuzzNoCustom(j) // fuzz self without calling this function again
+			//j.TemplateRef = nil // this is required for round trip
 		},
 		func(j *api.ReplicationControllerStatus, c fuzz.Continue) {
 			// only replicas round trips
@@ -184,6 +184,10 @@ func FuzzerFor(t *testing.T, version string, src rand.Source) *fuzz.Fuzzer {
 		},
 		func(p *api.ServiceAffinity, c fuzz.Continue) {
 			types := []api.ServiceAffinity{api.ServiceAffinityClientIP, api.ServiceAffinityNone}
+			*p = types[c.Rand.Intn(len(types))]
+		},
+		func(p *api.ServiceType, c fuzz.Continue) {
+			types := []api.ServiceType{api.ServiceTypeClusterIP, api.ServiceTypeNodePort, api.ServiceTypeLoadBalancer}
 			*p = types[c.Rand.Intn(len(types))]
 		},
 		func(ct *api.Container, c fuzz.Continue) {

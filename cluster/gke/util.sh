@@ -116,7 +116,7 @@ function kube-up() {
   detect-project >&2
 
   # Make the specified network if we need to.
-  if ! gcloud compute networks describe "${NETWORK}" &>/dev/null; then
+  if ! gcloud compute networks --project "${PROJECT}" describe "${NETWORK}" &>/dev/null; then
     echo "Creating new network: ${NETWORK}" >&2
     gcloud compute networks create "${NETWORK}" --project="${PROJECT}" --range "${NETWORK_RANGE}"
   else
@@ -125,7 +125,7 @@ function kube-up() {
 
   # Allow SSH on all nodes in the network. This doesn't actually check whether
   # such a rule exists, only whether we've created this exact rule.
-  if ! gcloud compute firewall-rules describe "${FIREWALL_SSH}" &>/dev/null; then
+  if ! gcloud compute firewall-rules --project "${PROJECT}" describe "${FIREWALL_SSH}" &>/dev/null; then
     echo "Creating new firewall for SSH: ${FIREWALL_SSH}" >&2
     gcloud compute firewall-rules create "${FIREWALL_SSH}" \
       --allow="tcp:22" \
@@ -167,7 +167,14 @@ function test-setup() {
   #                 collisions here?
   "${GCLOUD}" compute firewall-rules create \
     "${MINION_TAG}-${USER}-http-alt" \
-    --allow tcp:80 tcp:8080 \
+    --allow tcp:80,tcp:8080 \
+    --project "${PROJECT}" \
+    --target-tags "${MINION_TAG}" \
+    --network="${NETWORK}"
+
+  "${GCLOUD}" compute firewall-rules create \
+    "${MINION_TAG}-${USER}-nodeports" \
+    --allow tcp:30000-32767,udp:30000-32767 \
     --project "${PROJECT}" \
     --target-tags "${MINION_TAG}" \
     --network="${NETWORK}"
@@ -210,12 +217,12 @@ function detect-master() {
 }
 
 # Assumed vars:
-#   NUM_MINIONS
-#   CLUSTER_NAME
+#   none
 # Vars set:
-#   (none)
+#   MINION_NAMES
 function detect-minions() {
   echo "... in detect-minions()" >&2
+  detect-minion-names
 }
 
 # Detect minions created in the minion group
@@ -226,12 +233,11 @@ function detect-minions() {
 #   MINION_NAMES
 function detect-minion-names {
   detect-project
-  export MINION_NAMES=""
-  count=$("${GCLOUD}" alpha container clusters describe --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" | grep numNodes | cut -f 2 -d ' ')
-  for x in $(seq 1 $count); do
-    export MINION_NAMES="${MINION_NAMES} k8s-${CLUSTER_NAME}-node-${x} ";
-  done
-  MINION_NAMES=(${MINION_NAMES})
+  GROUP_NAME=($(gcloud preview --project "${PROJECT}" instance-groups \
+    --zone "${ZONE}" list | grep -o "k8s-${CLUSTER_NAME}-.\{8\}-group"))
+  MINION_NAMES=($(gcloud preview --project "${PROJECT}" instance-groups \
+    --zone "${ZONE}" instances --group "${GROUP_NAME}" list \
+    | cut -d'/' -f11))
   echo "MINION_NAMES=${MINION_NAMES[*]}"
 }
 
@@ -285,8 +291,10 @@ function test-teardown() {
   MINION_TAG="k8s-${CLUSTER_NAME}-node"
 
   # First, remove anything we did with test-setup (currently, the firewall).
-  # NOTE: Keep in sync with name above in test-setup.
+  # NOTE: Keep in sync with names above in test-setup.
   "${GCLOUD}" compute firewall-rules delete "${MINION_TAG}-${USER}-http-alt" \
+    --project="${PROJECT}" || true
+  "${GCLOUD}" compute firewall-rules delete "${MINION_TAG}-${USER}-nodeports" \
     --project="${PROJECT}" || true
 
   # Then actually turn down the cluster.

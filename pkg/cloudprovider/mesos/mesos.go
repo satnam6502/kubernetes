@@ -31,7 +31,7 @@ import (
 )
 
 var (
-	PluginName    = "mesos"
+	ProviderName  = "mesos"
 	CloudProvider *MesosCloud
 
 	noHostNameSpecified = errors.New("No hostname specified")
@@ -39,7 +39,7 @@ var (
 
 func init() {
 	cloudprovider.RegisterCloudProvider(
-		PluginName,
+		ProviderName,
 		func(configReader io.Reader) (cloudprovider.Interface, error) {
 			provider, err := newMesosCloud(configReader)
 			if err == nil {
@@ -105,6 +105,16 @@ func (c *MesosCloud) Clusters() (cloudprovider.Clusters, bool) {
 	return c, true
 }
 
+// Routes always returns nil, false in this implementation.
+func (c *MesosCloud) Routes() (cloudprovider.Routes, bool) {
+	return nil, false
+}
+
+// ProviderName returns the cloud provider ID.
+func (c *MesosCloud) ProviderName() string {
+	return ProviderName
+}
+
 // ListClusters lists the names of the available Mesos clusters.
 func (c *MesosCloud) ListClusters() ([]string, error) {
 	// Always returns a single cluster (this one!)
@@ -156,13 +166,18 @@ func ipAddress(name string) (net.IP, error) {
 	return ipaddr, nil
 }
 
-// ExternalID returns the cloud provider ID of the specified instance.
+// ExternalID returns the cloud provider ID of the specified instance (deprecated).
 func (c *MesosCloud) ExternalID(instance string) (string, error) {
 	ip, err := ipAddress(instance)
 	if err != nil {
 		return "", err
 	}
 	return ip.String(), nil
+}
+
+// InstanceID returns the cloud provider ID of the specified instance.
+func (c *MesosCloud) InstanceID(name string) (string, error) {
+	return "", nil
 }
 
 // List lists instances that match 'filter' which is a regular expression
@@ -223,16 +238,4 @@ func (c *MesosCloud) NodeAddresses(name string) ([]api.NodeAddress, error) {
 		return nil, err
 	}
 	return []api.NodeAddress{{Type: api.NodeLegacyHostIP, Address: ip.String()}}, nil
-}
-
-// Configure the specified instance using the spec.
-// Ths implementation is a noop.
-func (c *MesosCloud) Configure(name string, spec *api.NodeSpec) error {
-	return nil
-}
-
-// Release deletes all the configuration related to the instance, including other cloud resources.
-// Ths implementation is a noop.
-func (c *MesosCloud) Release(name string) error {
-	return nil
 }

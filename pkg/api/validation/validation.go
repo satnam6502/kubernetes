@@ -342,10 +342,14 @@ func validateSource(source *api.VolumeSource) errs.ValidationErrorList {
 		numVolumes++
 		allErrs = append(allErrs, validatePersistentClaimVolumeSource(source.PersistentVolumeClaimVolumeSource).Prefix("persistentVolumeClaim")...)
 	}
-
+	if source.RBD != nil {
+		numVolumes++
+		allErrs = append(allErrs, validateRBD(source.RBD).Prefix("rbd")...)
+	}
 	if numVolumes != 1 {
 		allErrs = append(allErrs, errs.NewFieldInvalid("", source, "exactly 1 volume type is required"))
 	}
+
 	return allErrs
 }
 
@@ -451,6 +455,20 @@ func validateGlusterfs(glusterfs *api.GlusterfsVolumeSource) errs.ValidationErro
 	return allErrs
 }
 
+func validateRBD(rbd *api.RBDVolumeSource) errs.ValidationErrorList {
+	allErrs := errs.ValidationErrorList{}
+	if len(rbd.CephMonitors) == 0 {
+		allErrs = append(allErrs, errs.NewFieldRequired("monitors"))
+	}
+	if rbd.RBDImage == "" {
+		allErrs = append(allErrs, errs.NewFieldRequired("image"))
+	}
+	if rbd.FSType == "" {
+		allErrs = append(allErrs, errs.NewFieldRequired("fsType"))
+	}
+	return allErrs
+}
+
 func ValidatePersistentVolumeName(name string, prefix bool) (bool, string) {
 	return nameIsDNSSubdomain(name, prefix)
 }
@@ -495,6 +513,14 @@ func ValidatePersistentVolume(pv *api.PersistentVolume) errs.ValidationErrorList
 	if pv.Spec.NFS != nil {
 		numVolumes++
 		allErrs = append(allErrs, validateNFS(pv.Spec.NFS).Prefix("nfs")...)
+	}
+	if pv.Spec.RBD != nil {
+		numVolumes++
+		allErrs = append(allErrs, validateRBD(pv.Spec.RBD).Prefix("rbd")...)
+	}
+	if pv.Spec.ISCSI != nil {
+		numVolumes++
+		allErrs = append(allErrs, validateISCSIVolumeSource(pv.Spec.ISCSI).Prefix("iscsi")...)
 	}
 	if numVolumes != 1 {
 		allErrs = append(allErrs, errs.NewFieldInvalid("", pv.Spec.PersistentVolumeSource, "exactly 1 volume type is required"))
@@ -685,22 +711,23 @@ func validateProbe(probe *api.Probe) errs.ValidationErrorList {
 	return allErrs
 }
 
-// AccumulateUniquePorts runs an extraction function on each Port of each Container,
+// AccumulateUniqueHostPorts extracts each HostPort of each Container,
 // accumulating the results and returning an error if any ports conflict.
-func AccumulateUniquePorts(containers []api.Container, accumulator map[int]bool, extract func(*api.ContainerPort) int) errs.ValidationErrorList {
+func AccumulateUniqueHostPorts(containers []api.Container, accumulator *util.StringSet) errs.ValidationErrorList {
 	allErrs := errs.ValidationErrorList{}
 
 	for ci, ctr := range containers {
 		cErrs := errs.ValidationErrorList{}
 		for pi := range ctr.Ports {
-			port := extract(&ctr.Ports[pi])
+			port := ctr.Ports[pi].HostPort
 			if port == 0 {
 				continue
 			}
-			if accumulator[port] {
-				cErrs = append(cErrs, errs.NewFieldDuplicate("port", port))
+			str := fmt.Sprintf("%d/%s", port, ctr.Ports[pi].Protocol)
+			if accumulator.Has(str) {
+				cErrs = append(cErrs, errs.NewFieldDuplicate("port", str))
 			} else {
-				accumulator[port] = true
+				accumulator.Insert(str)
 			}
 		}
 		allErrs = append(allErrs, cErrs.PrefixIndex(ci)...)
@@ -711,8 +738,8 @@ func AccumulateUniquePorts(containers []api.Container, accumulator map[int]bool,
 // checkHostPortConflicts checks for colliding Port.HostPort values across
 // a slice of containers.
 func checkHostPortConflicts(containers []api.Container) errs.ValidationErrorList {
-	allPorts := map[int]bool{}
-	return AccumulateUniquePorts(containers, allPorts, func(p *api.ContainerPort) int { return p.HostPort })
+	allPorts := util.StringSet{}
+	return AccumulateUniqueHostPorts(containers, &allPorts)
 }
 
 func validateExecAction(exec *api.ExecAction) errs.ValidationErrorList {
@@ -829,10 +856,6 @@ func validateContainers(containers []api.Container, volumes util.StringSet) errs
 		allErrs = append(allErrs, cErrs.PrefixIndex(i)...)
 	}
 	// Check for colliding ports across all containers.
-	// TODO(thockin): This really is dependent on the network config of the host (IP per pod?)
-	// and the config of the new manifest.  But we have not specced that out yet, so we'll just
-	// make some assumptions for now.  As of now, pods share a network namespace, which means that
-	// every Port.HostPort across the whole pod must be unique.
 	allErrs = append(allErrs, checkHostPortConflicts(containers)...)
 
 	return allErrs
@@ -984,8 +1007,8 @@ func ValidatePodStatusUpdate(newPod, oldPod *api.Pod) errs.ValidationErrorList {
 	allErrs = append(allErrs, ValidateObjectMetaUpdate(&oldPod.ObjectMeta, &newPod.ObjectMeta).Prefix("metadata")...)
 
 	// TODO: allow change when bindings are properly decoupled from pods
-	if newPod.Spec.Host != oldPod.Spec.Host {
-		allErrs = append(allErrs, errs.NewFieldInvalid("status.host", newPod.Spec.Host, "pod host cannot be changed directly"))
+	if newPod.Spec.NodeName != oldPod.Spec.NodeName {
+		allErrs = append(allErrs, errs.NewFieldInvalid("status.nodeName", newPod.Spec.NodeName, "pod nodename cannot be changed directly"))
 	}
 
 	// For status update we ignore changes to pod spec.
@@ -1013,6 +1036,8 @@ func ValidatePodTemplateUpdate(newPod, oldPod *api.PodTemplate) errs.ValidationE
 }
 
 var supportedSessionAffinityType = util.NewStringSet(string(api.ServiceAffinityClientIP), string(api.ServiceAffinityNone))
+var supportedServiceType = util.NewStringSet(string(api.ServiceTypeClusterIP), string(api.ServiceTypeNodePort),
+	string(api.ServiceTypeLoadBalancer))
 
 // ValidateService tests if required fields in the service are set.
 func ValidateService(service *api.Service) errs.ValidationErrorList {
@@ -1038,12 +1063,12 @@ func ValidateService(service *api.Service) errs.ValidationErrorList {
 	}
 
 	if api.IsServiceIPSet(service) {
-		if ip := net.ParseIP(service.Spec.PortalIP); ip == nil {
-			allErrs = append(allErrs, errs.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, "portalIP should be empty, 'None', or a valid IP address"))
+		if ip := net.ParseIP(service.Spec.ClusterIP); ip == nil {
+			allErrs = append(allErrs, errs.NewFieldInvalid("spec.clusterIP", service.Spec.ClusterIP, "clusterIP should be empty, 'None', or a valid IP address"))
 		}
 	}
 
-	for _, ip := range service.Spec.PublicIPs {
+	for _, ip := range service.Spec.DeprecatedPublicIPs {
 		if ip == "0.0.0.0" {
 			allErrs = append(allErrs, errs.NewFieldInvalid("spec.publicIPs", ip, "is not an IP address"))
 		} else if util.IsValidIPv4(ip) && net.ParseIP(ip).IsLoopback() {
@@ -1051,12 +1076,43 @@ func ValidateService(service *api.Service) errs.ValidationErrorList {
 		}
 	}
 
-	if service.Spec.CreateExternalLoadBalancer {
+	if service.Spec.Type == "" {
+		allErrs = append(allErrs, errs.NewFieldRequired("spec.type"))
+	} else if !supportedServiceType.Has(string(service.Spec.Type)) {
+		allErrs = append(allErrs, errs.NewFieldNotSupported("spec.type", service.Spec.Type))
+	}
+
+	if service.Spec.Type == api.ServiceTypeLoadBalancer {
 		for i := range service.Spec.Ports {
 			if service.Spec.Ports[i].Protocol != api.ProtocolTCP {
-				allErrs = append(allErrs, errs.NewFieldInvalid("spec.ports", service.Spec.Ports[i], "cannot create an external load balancer with non-TCP ports"))
+				allErrs = append(allErrs, errs.NewFieldInvalid(fmt.Sprintf("spec.ports[%d].protocol", i), service.Spec.Ports[i].Protocol, "cannot create an external load balancer with non-TCP ports"))
 			}
 		}
+	}
+
+	if service.Spec.Type == api.ServiceTypeClusterIP {
+		for i := range service.Spec.Ports {
+			if service.Spec.Ports[i].NodePort != 0 {
+				allErrs = append(allErrs, errs.NewFieldInvalid(fmt.Sprintf("spec.ports[%d].nodePort", i), service.Spec.Ports[i].NodePort, "cannot specify a node port with services of type ClusterIP"))
+			}
+		}
+	}
+
+	// Check for duplicate NodePorts, considering (protocol,port) pairs
+	nodePorts := make(map[api.ServicePort]bool)
+	for i := range service.Spec.Ports {
+		port := &service.Spec.Ports[i]
+		if port.NodePort == 0 {
+			continue
+		}
+		var key api.ServicePort
+		key.Protocol = port.Protocol
+		key.NodePort = port.NodePort
+		_, found := nodePorts[key]
+		if found {
+			allErrs = append(allErrs, errs.NewFieldInvalid(fmt.Sprintf("spec.ports[%d].nodePort", i), port.NodePort, "duplicate nodePort specified"))
+		}
+		nodePorts[key] = true
 	}
 
 	return allErrs
@@ -1101,10 +1157,8 @@ func ValidateServiceUpdate(oldService, service *api.Service) errs.ValidationErro
 	allErrs := errs.ValidationErrorList{}
 	allErrs = append(allErrs, ValidateObjectMetaUpdate(&oldService.ObjectMeta, &service.ObjectMeta).Prefix("metadata")...)
 
-	// TODO: PortalIP should be a Status field, since the system can set a value != to the user's value
-	// once PortalIP is set, it cannot be unset.
-	if api.IsServiceIPSet(oldService) && service.Spec.PortalIP != oldService.Spec.PortalIP {
-		allErrs = append(allErrs, errs.NewFieldInvalid("spec.portalIP", service.Spec.PortalIP, "field is immutable"))
+	if api.IsServiceIPSet(oldService) && service.Spec.ClusterIP != oldService.Spec.ClusterIP {
+		allErrs = append(allErrs, errs.NewFieldInvalid("spec.clusterIP", service.Spec.ClusterIP, "field is immutable"))
 	}
 
 	allErrs = append(allErrs, ValidateService(service)...)
@@ -1324,7 +1378,7 @@ func ValidateSecret(secret *api.Secret) errs.ValidationErrorList {
 			allErrs = append(allErrs, errs.NewFieldRequired(fmt.Sprintf("metadata.annotations[%s]", api.ServiceAccountNameKey)))
 		}
 	case api.SecretTypeOpaque, "":
-		// no-op
+	// no-op
 	case api.SecretTypeDockercfg:
 		dockercfgBytes, exists := secret.Data[api.DockerConfigKey]
 		if !exists {
@@ -1538,10 +1592,23 @@ func validateEndpointSubsets(subsets []api.EndpointSubset) errs.ValidationErrorL
 	return allErrs
 }
 
+var linkLocalNet *net.IPNet
+
 func validateEndpointAddress(address *api.EndpointAddress) errs.ValidationErrorList {
+	if linkLocalNet == nil {
+		var err error
+		_, linkLocalNet, err = net.ParseCIDR("169.254.0.0/16")
+		if err != nil {
+			glog.Errorf("Failed to parse link-local CIDR: %v", err)
+		}
+	}
+
 	allErrs := errs.ValidationErrorList{}
 	if !util.IsValidIPv4(address.IP) {
 		allErrs = append(allErrs, errs.NewFieldInvalid("ip", address.IP, "invalid IPv4 address"))
+	}
+	if linkLocalNet.Contains(net.ParseIP(address.IP)) {
+		allErrs = append(allErrs, errs.NewFieldInvalid("ip", address.IP, "may not be in the link-local range (169.254.0.0/16)"))
 	}
 	return allErrs
 }

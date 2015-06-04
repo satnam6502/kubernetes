@@ -48,6 +48,8 @@ readonly KUBE_TEST_TARGETS=(
   cmd/gendocs
   cmd/genman
   cmd/genbashcomp
+  cmd/genconversion
+  cmd/gendeepcopy
   examples/k8petstore/web-server
   github.com/onsi/ginkgo/ginkgo
   test/e2e/e2e.test
@@ -97,6 +99,11 @@ readonly KUBE_STATIC_LIBRARIES=(
 kube::golang::is_statically_linked_library() {
   local e
   for e in "${KUBE_STATIC_LIBRARIES[@]}"; do [[ "$1" == *"/$e" ]] && return 0; done;
+  # Allow individual overrides--e.g., so that you can get a static build of
+  # kubectl for inclusion in a container.
+  if [ -n "${KUBE_STATIC_OVERRIDES:+x}" ]; then
+    for e in "${KUBE_STATIC_OVERRIDES[@]}"; do [[ "$1" == *"/$e" ]] && return 0; done;
+  fi
   return 1;
 }
 
@@ -327,20 +334,20 @@ kube::golang::build_binaries_for_platform() {
 
   if [[ -n ${use_go_build:-} ]]; then
     kube::log::progress "    "
-    for binary in "${binaries[@]}"; do
-      local outfile=$(kube::golang::output_filename_for_binary "${binary}" \
-        "${platform}")
-      if kube::golang::is_statically_linked_library "${binary}"; then
-        CGO_ENABLED=0 go build -o "${outfile}" \
-          "${goflags[@]:+${goflags[@]}}" \
-          -ldflags "${version_ldflags}" \
-          "${binary}"
-      else
-        go build -o "${outfile}" \
-          "${goflags[@]:+${goflags[@]}}" \
-          -ldflags "${version_ldflags}" \
-          "${binary}"
-      fi
+    for binary in "${statics[@]:+${statics[@]}}"; do
+      local outfile=$(kube::golang::output_filename_for_binary "${binary}" "${platform}")
+      CGO_ENABLED=0 go build -o "${outfile}" \
+        "${goflags[@]:+${goflags[@]}}" \
+        -ldflags "${version_ldflags}" \
+        "${binary}"
+      kube::log::progress "*"
+    done
+    for binary in "${nonstatics[@]:+${nonstatics[@]}}"; do
+      local outfile=$(kube::golang::output_filename_for_binary "${binary}" "${platform}")
+      go build -o "${outfile}" \
+        "${goflags[@]:+${goflags[@]}}" \
+        -ldflags "${version_ldflags}" \
+        "${binary}"
       kube::log::progress "*"
     done
     kube::log::progress "\n"

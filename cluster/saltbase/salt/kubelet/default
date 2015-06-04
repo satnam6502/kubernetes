@@ -22,11 +22,16 @@
   {% set api_servers_with_port = api_servers + ":6443" -%}
 {% endif -%}
 
-# Disable registration for the kubelet running on the master on GCE.
+# Disable registration for the kubelet running on the master on GCE. Also disable
+# the debugging handlers (/run and /exec) to prevent arbitrary code execution on
+# the master.
 # TODO(roberthbailey): Make this configurable via an env var in config-default.sh
-{% if grains.cloud == 'gce' -%}
+
+{% set debugging_handlers = "--enable-debugging-handlers=true" -%}
+{% if grains.cloud in ['gce', 'vagrant'] -%}
   {% if grains['roles'][0] == 'kubernetes-master' -%}
     {% set api_servers_with_port = "" -%}
+    {% set debugging_handlers = "--enable-debugging-handlers=false" -%}
   {% endif -%}
 {% endif -%}
 
@@ -53,9 +58,22 @@
   {% set docker_root = " --docker_root=" + grains.docker_root -%}
 {% endif -%}
 
+{% set kubelet_root = "" -%}
+{% if grains.kubelet_root is defined -%}
+  {% set kubelet_root = " --root_dir=" + grains.kubelet_root -%}
+{% endif -%}
+
 {% set configure_cbr0 = "" -%}
 {% if pillar['allocate_node_cidrs'] is defined -%}
   {% set configure_cbr0 = "--configure-cbr0=" + pillar['allocate_node_cidrs'] -%}
 {% endif -%}
 
-DAEMON_ARGS="{{daemon_args}} {{api_servers_with_port}} {{hostname_override}} {{cloud_provider}} {{config}} --allow_privileged={{pillar['allow_privileged']}} {{pillar['log_level']}} {{cluster_dns}} {{cluster_domain}} {{docker_root}} {{configure_cbr0}}"
+# Run containers under the root cgroup and create a system container.
+{% set system_container = "" -%}
+{% set cgroup_root = "" -%}
+{% if grains['os_family'] == 'Debian' -%}
+  {% set system_container = "--system-container=/system" -%}
+  {% set cgroup_root = "--cgroup_root=/" -%}
+{% endif -%}
+
+DAEMON_ARGS="{{daemon_args}} {{api_servers_with_port}} {{debugging_handlers}} {{hostname_override}} {{cloud_provider}} {{config}} --allow_privileged={{pillar['allow_privileged']}} {{pillar['log_level']}} {{cluster_dns}} {{cluster_domain}} {{docker_root}} {{kubelet_root}} {{configure_cbr0}} {{cgroup_root}} {{system_container}}"

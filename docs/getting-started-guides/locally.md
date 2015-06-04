@@ -46,8 +46,8 @@ You can now use any of the cluster/kubectl.sh commands to interact with your loc
 ```
 cluster/kubectl.sh get pods
 cluster/kubectl.sh get services
-cluster/kubectl.sh get replicationControllers
-cluster/kubectl.sh run-container my-nginx --image=nginx --replicas=2 --port=80
+cluster/kubectl.sh get replicationcontrollers
+cluster/kubectl.sh run my-nginx --image=nginx --replicas=2 --port=80
 
 
 ## begin wait for provision to complete, you can monitor the docker pull by opening a new terminal
@@ -61,7 +61,7 @@ cluster/kubectl.sh run-container my-nginx --image=nginx --replicas=2 --port=80
 ## introspect kubernetes!
 cluster/kubectl.sh get pods
 cluster/kubectl.sh get services
-cluster/kubectl.sh get replicationControllers
+cluster/kubectl.sh get replicationcontrollers
 ```
 
 
@@ -87,10 +87,10 @@ Some firewall software that uses iptables may not interact well with
 kubernetes.  If you're having trouble around networking, try disabling any
 firewall or other iptables-using systems, first.
 
-By default the IP range for service portals is 10.0.*.* - depending on your
+By default the IP range for service cluster IPs is 10.0.*.* - depending on your
 docker installation, this may conflict with IPs for containers.  If you find
 containers running with IPs in this range, edit hack/local-cluster-up.sh and
-change the portal_net flag to something else.
+change the service-cluster-ip-range flag to something else.
 
 #### I cannot create a replication controller with replica size greater than 1!  What gives?
 

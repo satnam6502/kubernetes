@@ -76,15 +76,15 @@ Run a proxy to the Kubernetes API server.
     Path to the kubeconfig file to use for CLI requests.
 
 .PP
-\fB\-\-log\_backtrace\_at\fP=:0
+\fB\-\-log\-backtrace\-at\fP=:0
     when logging hits line file:N, emit a stack trace
 
 .PP
-\fB\-\-log\_dir\fP=""
+\fB\-\-log\-dir\fP=""
     If non\-empty, write log files in this directory
 
 .PP
-\fB\-\-log\_flush\_frequency\fP=5s
+\fB\-\-log\-flush\-frequency\fP=5s
     Maximum number of seconds between log flushes
 
 .PP
@@ -145,8 +145,8 @@ Run a proxy to the Kubernetes API server.
 $ kubectl proxy \-\-port=8011 \-\-www=./local/www/
 
 // Run a proxy to kubernetes apiserver, changing the api prefix to k8s\-api
-// This makes e.g. the pods api available at localhost:8011/k8s\-api/v1beta1/pods/
-$ kubectl proxy \-\-api\-prefix=k8s\-api
+// This makes e.g. the pods api available at localhost:8011/k8s\-api/v1beta3/pods/
+$ kubectl proxy \-\-api\-prefix=/k8s\-api
 
 .fi
 .RE

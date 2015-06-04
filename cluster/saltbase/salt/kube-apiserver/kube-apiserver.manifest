@@ -22,6 +22,11 @@
 
 {% endif -%}
 
+{% set advertise_address = "" -%}
+{% if grains.advertise_address is defined -%}
+  {% set advertise_address = "--advertise-address=" + grains.advertise_address -%}
+{% endif -%}
+
 {% set address = "--address=127.0.0.1" -%}
 
 {% set cluster_name = "" -%}
@@ -29,16 +34,16 @@
   {% set cluster_name = "--cluster_name=" + pillar['instance_prefix'] -%}
 {% endif -%}
 
-{% set publicAddressOverride = "" -%}
+{% set bind_address = "" -%}
 {% if grains.publicAddressOverride is defined -%}
-  {% set publicAddressOverride = "--public_address_override=" + grains.publicAddressOverride -%}
+  {% set bind_address = "--bind-address=" + grains.publicAddressOverride -%}
 {% endif -%}
 
 {% set etcd_servers = "--etcd_servers=http://127.0.0.1:4001" -%}
 
-{% set portal_net = "" -%}
-{% if pillar['portal_net'] is defined -%}
-  {% set portal_net = "--portal_net=" + pillar['portal_net'] -%}
+{% set service_cluster_ip_range = "" -%}
+{% if pillar['service_cluster_ip_range'] is defined -%}
+  {% set service_cluster_ip_range = "--service-cluster-ip-range=" + pillar['service_cluster_ip_range'] -%}
 {% endif -%}
 
 {% set cert_file = "--tls_cert_file=/srv/kubernetes/server.cert" -%}
@@ -53,6 +58,11 @@
 
 {% set token_auth_file = "--token_auth_file=/dev/null" -%}
 {% set basic_auth_file = "" -%}
+
+{% set min_request_timeout = "" -%}
+{% if grains.minRequestTimeout is defined -%}
+  {% set min_request_timeout = "--min-request-timeout=" + grains.minRequestTimeout -%}
+{% endif -%}
 
 {% if grains.cloud is defined -%}
 {% if grains.cloud in [ 'aws', 'gce', 'vagrant' ] -%}
@@ -74,9 +84,8 @@
  {% set runtime_config = "--runtime_config=" + grains.runtime_config -%}
 {% endif -%}
 
-{% set params = address + " " + etcd_servers + " " + cloud_provider + " " + cloud_config + " " + runtime_config + " " + admission_control + " " + portal_net + " " + client_ca_file + " " + basic_auth_file -%}
-{% set params = params + " " + cluster_name + " " + cert_file + " " + key_file + " --secure_port=" + secure_port + " " + token_auth_file + " " + publicAddressOverride + " " + pillar['log_level'] -%}
-
+{% set params = address + " " + etcd_servers + " " + cloud_provider + " " + cloud_config + " " + runtime_config + " " + admission_control + " " + service_cluster_ip_range + " " + client_ca_file + " " + basic_auth_file + " " + min_request_timeout -%}
+{% set params = params + " " + cluster_name + " " + cert_file + " " + key_file + " --secure_port=" + secure_port + " " + token_auth_file + " " + bind_address + " " + pillar['log_level'] + " " + advertise_address -%}
 
 {
 "apiVersion": "v1beta3",
@@ -97,9 +106,6 @@
       { "name": "https",
         "containerPort": {{secure_port}},
         "hostPort": {{secure_port}}},{
-       "name": "http",
-        "containerPort": 7080,
-        "hostPort": 7080},{
        "name": "local",
         "containerPort": 8080,
         "hostPort": 8080}

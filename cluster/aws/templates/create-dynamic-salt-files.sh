@@ -22,7 +22,7 @@ mkdir -p /srv/salt-overlay/pillar
 cat <<EOF >/srv/salt-overlay/pillar/cluster-params.sls
 instance_prefix: '$(echo "$INSTANCE_PREFIX" | sed -e "s/'/''/g")'
 node_instance_prefix: '$(echo "$NODE_INSTANCE_PREFIX" | sed -e "s/'/''/g")'
-portal_net: '$(echo "$PORTAL_NET" | sed -e "s/'/''/g")'
+service_cluster_ip_range: '$(echo "$SERVICE_CLUSTER_IP_RANGE" | sed -e "s/'/''/g")'
 enable_cluster_monitoring: '$(echo "$ENABLE_CLUSTER_MONITORING" | sed -e "s/'/''/g")'
 enable_node_monitoring: '$(echo "$ENABLE_NODE_MONITORING" | sed -e "s/'/''/g")'
 enable_cluster_logging: '$(echo "$ENABLE_CLUSTER_LOGGING" | sed -e "s/'/''/g")'
@@ -46,9 +46,8 @@ fi
 # Generate and distribute a shared secret (bearer token) to
 # apiserver and the nodes so that kubelet and kube-proxy can
 # authenticate to apiserver.
-# This works on CoreOS, so it should work on a lot of distros.
-kubelet_token=$(cat /dev/urandom | base64 | tr -d "=+/" | dd bs=32 count=1 2> /dev/null)
-kube_proxy_token=$(cat /dev/urandom | base64 | tr -d "=+/" | dd bs=32 count=1 2> /dev/null)
+kubelet_token=$KUBELET_TOKEN
+kube_proxy_token=$KUBE_PROXY_TOKEN
 
 # Make a list of tokens and usernames to be pushed to the apiserver
 mkdir -p /srv/salt-overlay/salt/kube-apiserver

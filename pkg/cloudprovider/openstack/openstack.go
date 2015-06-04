@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"regexp"
 	"time"
 
@@ -40,6 +41,8 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/golang/glog"
 )
+
+const ProviderName = "openstack"
 
 var ErrNotFound = errors.New("Failed to find object")
 var ErrMultipleResults = errors.New("Multiple results where only one expected")
@@ -98,7 +101,7 @@ type Config struct {
 }
 
 func init() {
-	cloudprovider.RegisterCloudProvider("openstack", func(config io.Reader) (cloudprovider.Interface, error) {
+	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) {
 		cfg, err := readConfig(config)
 		if err != nil {
 			return nil, err
@@ -354,13 +357,24 @@ func (i *Instances) NodeAddresses(name string) ([]api.NodeAddress, error) {
 	return addrs, nil
 }
 
-// ExternalID returns the cloud provider ID of the specified instance.
+// ExternalID returns the cloud provider ID of the specified instance (deprecated).
 func (i *Instances) ExternalID(name string) (string, error) {
 	srv, err := getServerByName(i.compute, name)
 	if err != nil {
 		return "", err
 	}
 	return srv.ID, nil
+}
+
+// InstanceID returns the cloud provider ID of the specified instance.
+func (i *Instances) InstanceID(name string) (string, error) {
+	srv, err := getServerByName(i.compute, name)
+	if err != nil {
+		return "", err
+	}
+	// In the future it is possible to also return an endpoint as:
+	// <endpoint>/<instanceid>
+	return "/" + srv.ID, nil
 }
 
 func (i *Instances) GetNodeResources(name string) (*api.NodeResources, error) {
@@ -389,16 +403,13 @@ func (i *Instances) GetNodeResources(name string) (*api.NodeResources, error) {
 	return rsrc, nil
 }
 
-func (i *Instances) Configure(name string, spec *api.NodeSpec) error {
-	return nil
-}
-
-func (i *Instances) Release(name string) error {
-	return nil
-}
-
 func (os *OpenStack) Clusters() (cloudprovider.Clusters, bool) {
 	return nil, false
+}
+
+// ProviderName returns the cloud provider ID.
+func (os *OpenStack) ProviderName() string {
+	return ProviderName
 }
 
 type LoadBalancer struct {
@@ -464,15 +475,19 @@ func getVipByName(client *gophercloud.ServiceClient, name string) (*vips.Virtual
 	return &vipList[0], nil
 }
 
-func (lb *LoadBalancer) GetTCPLoadBalancer(name, region string) (endpoint string, exists bool, err error) {
+func (lb *LoadBalancer) GetTCPLoadBalancer(name, region string) (*api.LoadBalancerStatus, bool, error) {
 	vip, err := getVipByName(lb.network, name)
 	if err == ErrNotFound {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if vip == nil {
-		return "", false, err
+		return nil, false, err
 	}
-	return vip.Address, true, err
+
+	status := &api.LoadBalancerStatus{}
+	status.Ingress = []api.LoadBalancerIngress{{IP: vip.Address}}
+
+	return status, true, err
 }
 
 // TODO: This code currently ignores 'region' and always creates a
@@ -480,11 +495,11 @@ func (lb *LoadBalancer) GetTCPLoadBalancer(name, region string) (endpoint string
 // a list of regions (from config) and query/create loadbalancers in
 // each region.
 
-func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP net.IP, ports []int, hosts []string, affinity api.ServiceAffinity) (string, error) {
+func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP net.IP, ports []*api.ServicePort, hosts []string, affinity api.ServiceAffinity) (*api.LoadBalancerStatus, error) {
 	glog.V(4).Infof("CreateTCPLoadBalancer(%v, %v, %v, %v, %v, %v)", name, region, externalIP, ports, hosts, affinity)
 
 	if len(ports) > 1 {
-		return "", fmt.Errorf("multiple ports are not yet supported in openstack load balancers")
+		return nil, fmt.Errorf("multiple ports are not yet supported in openstack load balancers")
 	}
 
 	var persistence *vips.SessionPersistence
@@ -494,7 +509,7 @@ func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP ne
 	case api.ServiceAffinityClientIP:
 		persistence = &vips.SessionPersistence{Type: "SOURCE_IP"}
 	default:
-		return "", fmt.Errorf("unsupported load balancer affinity: %v", affinity)
+		return nil, fmt.Errorf("unsupported load balancer affinity: %v", affinity)
 	}
 
 	lbmethod := lb.opts.LBMethod
@@ -508,23 +523,23 @@ func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP ne
 		LBMethod: lbmethod,
 	}).Extract()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	for _, host := range hosts {
 		addr, err := getAddressByName(lb.compute, host)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
 		_, err = members.Create(lb.network, members.CreateOpts{
 			PoolID:       pool.ID,
-			ProtocolPort: ports[0], //TODO: need to handle multi-port
+			ProtocolPort: ports[0].Port, //TODO: need to handle multi-port
 			Address:      addr,
 		}).Extract()
 		if err != nil {
 			pools.Delete(lb.network, pool.ID)
-			return "", err
+			return nil, err
 		}
 	}
 
@@ -538,14 +553,14 @@ func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP ne
 		}).Extract()
 		if err != nil {
 			pools.Delete(lb.network, pool.ID)
-			return "", err
+			return nil, err
 		}
 
 		_, err = pools.AssociateMonitor(lb.network, pool.ID, mon.ID).Extract()
 		if err != nil {
 			monitors.Delete(lb.network, mon.ID)
 			pools.Delete(lb.network, pool.ID)
-			return "", err
+			return nil, err
 		}
 	}
 
@@ -554,7 +569,7 @@ func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP ne
 		Description:  fmt.Sprintf("Kubernetes external service %s", name),
 		Address:      externalIP.String(),
 		Protocol:     "TCP",
-		ProtocolPort: ports[0], //TODO: need to handle multi-port
+		ProtocolPort: ports[0].Port, //TODO: need to handle multi-port
 		PoolID:       pool.ID,
 		Persistence:  persistence,
 	}).Extract()
@@ -563,10 +578,13 @@ func (lb *LoadBalancer) CreateTCPLoadBalancer(name, region string, externalIP ne
 			monitors.Delete(lb.network, mon.ID)
 		}
 		pools.Delete(lb.network, pool.ID)
-		return "", err
+		return nil, err
 	}
 
-	return vip.Address, nil
+	status := &api.LoadBalancerStatus{}
+	status.Ingress = []api.LoadBalancerIngress{{IP: vip.Address}}
+
+	return status, nil
 }
 
 func (lb *LoadBalancer) UpdateTCPLoadBalancer(name, region string, hosts []string) error {
@@ -630,31 +648,49 @@ func (lb *LoadBalancer) UpdateTCPLoadBalancer(name, region string, hosts []strin
 	return nil
 }
 
-func (lb *LoadBalancer) DeleteTCPLoadBalancer(name, region string) error {
-	glog.V(4).Infof("DeleteTCPLoadBalancer(%v, %v)", name, region)
+func (lb *LoadBalancer) EnsureTCPLoadBalancerDeleted(name, region string) error {
+	glog.V(4).Infof("EnsureTCPLoadBalancerDeleted(%v, %v)", name, region)
 
-	vip, err := getVipByName(lb.network, name)
-	if err != nil {
-		return err
+	// TODO(#8352): Because we look up the pool using the VIP object, if the VIP
+	// is already gone we can't attempt to delete the pool. We should instead
+	// continue even if the VIP doesn't exist and attempt to delete the pool by
+	// name.
+	vip, vipErr := getVipByName(lb.network, name)
+	if vipErr == ErrNotFound {
+		return nil
+	} else if vipErr != nil {
+		return vipErr
 	}
 
-	pool, err := pools.Get(lb.network, vip.PoolID).Extract()
-	if err != nil {
-		return err
+	// It's ok if the pool doesn't exist, as we may still need to delete the vip
+	// (although I don't believe the system should ever be in that state).
+	pool, poolErr := pools.Get(lb.network, vip.PoolID).Extract()
+	if poolErr != nil {
+		detailedErr, ok := poolErr.(*gophercloud.UnexpectedResponseCodeError)
+		if !ok || detailedErr.Actual != http.StatusNotFound {
+			return poolErr
+		}
 	}
+	poolExists := (poolErr == nil)
 
-	// Have to delete VIP before pool can be deleted
-	err = vips.Delete(lb.network, vip.ID).ExtractErr()
-	if err != nil {
+	// We have to delete the VIP before the pool can be deleted, so we can't
+	// continue on if this fails.
+	// TODO(#8352): Only do this if the VIP exists once we can delete pools by
+	// name rather than by ID.
+	err := vips.Delete(lb.network, vip.ID).ExtractErr()
+	if err != nil && err != ErrNotFound {
 		return err
 	}
 
 	// Ignore errors for everything following here
 
-	for _, monId := range pool.MonitorIDs {
-		pools.DisassociateMonitor(lb.network, pool.ID, monId)
+	if poolExists {
+		for _, monId := range pool.MonitorIDs {
+			// TODO(#8352): Delete the monitor, don't just disassociate it.
+			pools.DisassociateMonitor(lb.network, pool.ID, monId)
+		}
+		pools.Delete(lb.network, pool.ID)
 	}
-	pools.Delete(lb.network, pool.ID)
 
 	return nil
 }
@@ -668,4 +704,8 @@ func (os *OpenStack) GetZone() (cloudprovider.Zone, error) {
 	glog.V(1).Infof("Current zone is %v", os.region)
 
 	return cloudprovider.Zone{Region: os.region}, nil
+}
+
+func (os *OpenStack) Routes() (cloudprovider.Routes, bool) {
+	return nil, false
 }

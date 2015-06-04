@@ -106,6 +106,9 @@ type DockerManager struct {
 
 	// Hooks injected into the container runtime.
 	runtimeHooks kubecontainer.RuntimeHooks
+
+	// Handler used to execute commands in containers.
+	execHandler ExecHandler
 }
 
 func NewDockerManager(
@@ -121,7 +124,8 @@ func NewDockerManager(
 	networkPlugin network.NetworkPlugin,
 	generator kubecontainer.RunContainerOptionsGenerator,
 	httpClient kubeletTypes.HttpGetter,
-	runtimeHooks kubecontainer.RuntimeHooks) *DockerManager {
+	runtimeHooks kubecontainer.RuntimeHooks,
+	execHandler ExecHandler) *DockerManager {
 	// Work out the location of the Docker runtime, defaulting to /var/lib/docker
 	// if there are any problems.
 	dockerRoot := "/var/lib/docker"
@@ -153,6 +157,7 @@ func NewDockerManager(
 	}
 
 	reasonCache := stringCache{cache: lru.New(maxReasonCacheEntries)}
+
 	dm := &DockerManager{
 		client:              client,
 		recorder:            recorder,
@@ -168,6 +173,7 @@ func NewDockerManager(
 		prober:                 nil,
 		generator:              generator,
 		runtimeHooks:           runtimeHooks,
+		execHandler:            execHandler,
 	}
 	dm.runner = lifecycle.NewHandlerRunner(httpClient, dm, dm)
 	dm.prober = prober.New(dm, readinessManager, containerRefManager, recorder)
@@ -290,7 +296,7 @@ func (dm *DockerManager) inspectContainer(dockerID, containerName, tPath string)
 		} else {
 			reason = inspectResult.State.Error
 		}
-		result.status.State.Termination = &api.ContainerStateTerminated{
+		result.status.State.Terminated = &api.ContainerStateTerminated{
 			ExitCode:    inspectResult.State.ExitCode,
 			Reason:      reason,
 			StartedAt:   util.NewTime(inspectResult.State.StartedAt),
@@ -304,7 +310,7 @@ func (dm *DockerManager) inspectContainer(dockerID, containerName, tPath string)
 				if err != nil {
 					glog.Errorf("Error on reading termination-log %s: %v", path, err)
 				} else {
-					result.status.State.Termination.Message = string(data)
+					result.status.State.Terminated.Message = string(data)
 				}
 			}
 		}
@@ -329,8 +335,8 @@ func (dm *DockerManager) GetPodStatus(pod *api.Pod) (*api.PodStatus, error) {
 	lastObservedTime := make(map[string]util.Time, len(pod.Spec.Containers))
 	for _, status := range pod.Status.ContainerStatuses {
 		oldStatuses[status.Name] = status
-		if status.LastTerminationState.Termination != nil {
-			lastObservedTime[status.Name] = status.LastTerminationState.Termination.FinishedAt
+		if status.LastTerminationState.Terminated != nil {
+			lastObservedTime[status.Name] = status.LastTerminationState.Terminated.FinishedAt
 		}
 	}
 
@@ -381,19 +387,19 @@ func (dm *DockerManager) GetPodStatus(pod *api.Pod) (*api.PodStatus, error) {
 		result := dm.inspectContainer(value.ID, dockerContainerName, terminationMessagePath)
 		if result.err != nil {
 			return nil, result.err
-		} else if result.status.State.Termination != nil {
+		} else if result.status.State.Terminated != nil {
 			terminationState = &result.status.State
 		}
 
 		if containerStatus, found := statuses[dockerContainerName]; found {
-			if containerStatus.LastTerminationState.Termination == nil && terminationState != nil {
+			if containerStatus.LastTerminationState.Terminated == nil && terminationState != nil {
 				// Populate the last termination state.
 				containerStatus.LastTerminationState = *terminationState
 			}
 			count := true
 			// Only count dead containers terminated after last time we observed,
 			if lastObservedTime, ok := lastObservedTime[dockerContainerName]; ok {
-				if terminationState != nil && terminationState.Termination.FinishedAt.After(lastObservedTime.Time) {
+				if terminationState != nil && terminationState.Terminated.FinishedAt.After(lastObservedTime.Time) {
 					count = false
 				} else {
 					// The container finished before the last observation. No
@@ -590,7 +596,7 @@ func (dm *DockerManager) runContainer(
 		},
 	}
 
-	setEntrypointAndCommand(container, &dockerOpts)
+	setEntrypointAndCommand(container, opts, &dockerOpts)
 
 	glog.V(3).Infof("Container %v/%v/%v: setting entrypoint \"%v\" and command \"%v\"", pod.Namespace, pod.Name, container.Name, dockerOpts.Config.Entrypoint, dockerOpts.Config.Cmd)
 
@@ -661,13 +667,11 @@ func (dm *DockerManager) runContainer(
 	return dockerContainer.ID, nil
 }
 
-func setEntrypointAndCommand(container *api.Container, opts *docker.CreateContainerOptions) {
-	if len(container.Command) != 0 {
-		opts.Config.Entrypoint = container.Command
-	}
-	if len(container.Args) != 0 {
-		opts.Config.Cmd = container.Args
-	}
+func setEntrypointAndCommand(container *api.Container, opts *kubecontainer.RunContainerOptions, dockerOpts *docker.CreateContainerOptions) {
+	command, args := kubecontainer.ExpandContainerCommandAndArgs(container, opts.Envs)
+
+	dockerOpts.Config.Entrypoint = command
+	dockerOpts.Config.Cmd = args
 }
 
 // A helper function to get the KubeletContainerName and hash from a docker
@@ -824,7 +828,7 @@ func (dm *DockerManager) podInfraContainerChanged(pod *api.Pod, podInfraContaine
 		Image: dm.PodInfraContainerImage,
 		Ports: ports,
 	}
-	return podInfraContainer.Hash != HashContainer(expectedPodInfraContainer), nil
+	return podInfraContainer.Hash != kubecontainer.HashContainer(expectedPodInfraContainer), nil
 }
 
 type dockerVersion docker.APIVersion
@@ -971,78 +975,24 @@ func (d *dockerExitError) ExitStatus() int {
 	return d.Inspect.ExitCode
 }
 
-// ExecInContainer uses nsenter to run the command inside the container identified by containerID.
+// ExecInContainer runs the command inside the container identified by containerID.
 //
 // TODO:
-//  - match cgroups of container
-//  - should we support `docker exec`?
-//  - should we support nsenter in a container, running with elevated privs and --pid=host?
 //  - use strong type for containerId
 func (dm *DockerManager) ExecInContainer(containerId string, cmd []string, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool) error {
-	nsenter, err := exec.LookPath("nsenter")
-	if err != nil {
-		return fmt.Errorf("exec unavailable - unable to locate nsenter")
+	if dm.execHandler == nil {
+		return errors.New("unable to exec without an exec handler")
 	}
 
 	container, err := dm.client.InspectContainer(containerId)
 	if err != nil {
 		return err
 	}
-
 	if !container.State.Running {
 		return fmt.Errorf("container not running (%s)", container)
 	}
 
-	containerPid := container.State.Pid
-
-	// TODO what if the container doesn't have `env`???
-	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-m", "-i", "-u", "-n", "-p", "--", "env", "-i"}
-	args = append(args, fmt.Sprintf("HOSTNAME=%s", container.Config.Hostname))
-	args = append(args, container.Config.Env...)
-	args = append(args, cmd...)
-	command := exec.Command(nsenter, args...)
-	if tty {
-		p, err := kubecontainer.StartPty(command)
-		if err != nil {
-			return err
-		}
-		defer p.Close()
-
-		// make sure to close the stdout stream
-		defer stdout.Close()
-
-		if stdin != nil {
-			go io.Copy(p, stdin)
-		}
-
-		if stdout != nil {
-			go io.Copy(stdout, p)
-		}
-
-		return command.Wait()
-	} else {
-		if stdin != nil {
-			// Use an os.Pipe here as it returns true *os.File objects.
-			// This way, if you run 'kubectl exec -p <pod> -i bash' (no tty) and type 'exit',
-			// the call below to command.Run() can unblock because its Stdin is the read half
-			// of the pipe.
-			r, w, err := os.Pipe()
-			if err != nil {
-				return err
-			}
-			go io.Copy(w, stdin)
-
-			command.Stdin = r
-		}
-		if stdout != nil {
-			command.Stdout = stdout
-		}
-		if stderr != nil {
-			command.Stderr = stderr
-		}
-
-		return command.Run()
-	}
+	return dm.execHandler.ExecInContainer(dm.client, container, cmd, stdin, stdout, stderr, tty)
 }
 
 // PortForward executes socat in the pod's network namespace and copies
@@ -1355,7 +1305,7 @@ func (dm *DockerManager) computePodContainerChanges(pod *api.Pod, runningPod kub
 	}
 
 	for index, container := range pod.Spec.Containers {
-		expectedHash := HashContainer(&container)
+		expectedHash := kubecontainer.HashContainer(&container)
 
 		c := runningPod.FindContainerByName(container.Name)
 		if c == nil {

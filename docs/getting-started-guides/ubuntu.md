@@ -1,8 +1,8 @@
-# Kubernetes deployed on ubuntu nodes
+# Kubernetes Deployment On Bare-metal Ubuntu Nodes
 
-This document describes how to deploy kubernetes on ubuntu nodes, including 1 master node and 3 minion nodes, and people uses this approach can scale to **any number of minion nodes** by changing some settings with ease. Although there exists saltstack based ubuntu k8s installation ,  it may be tedious and hard for a guy that knows little about saltstack but want to build a really distributed k8s cluster. This new approach of kubernetes deployment is much more easy and automatical than the previous one.
+This document describes how to deploy kubernetes on ubuntu nodes, including 1 master node and 3 minion nodes, and people uses this approach can scale to **any number of minion nodes** by changing some settings with ease. The original idea was heavily inspired by @jainvipin 's ubuntu single node work, which has been merge into this document.
 
-[Cloud team from ZJU](https://github.com/ZJU-SEL) will keep updating this work.
+[Cloud team from Zhejiang University](https://github.com/ZJU-SEL) will maintain this work.
 
 ### **Prerequisites：**
 *1 The minion nodes have installed docker version 1.2+ and bridge-utils to manipulate linux bridge* 
@@ -11,7 +11,7 @@ This document describes how to deploy kubernetes on ubuntu nodes, including 1 ma
 
 *3 These guide is tested OK on Ubuntu 14.04 LTS 64bit server, but it should also work on most Ubuntu versions*
 
-*4 Dependences of this guide: etcd-2.0.0, flannel-0.4.0, k8s-0.15.0, but it may work with higher versions*
+*4 Dependences of this guide: etcd-2.0.9, flannel-0.4.0, k8s-0.18.0, but it may work with higher versions*
 
 *5 All the remote servers can be ssh logged in without a password by using key authentication* 
 
@@ -24,7 +24,7 @@ then `$ cd kubernetes/cluster/ubuntu`.
 
 Then run `$ ./build.sh`, this will download all the needed binaries into `./binaries`.
 
-You can customize your etcd version, flannel version, k8s version by changing variable `ETCD_VERSION` , `FLANNEL_VERSION` and `K8S_VERSION` in build.sh, default etcd version is 2.0.0 , flannel version is 0.4.0 and K8s version is 0.15.0.
+You can customize your etcd version, flannel version, k8s version by changing variable `ETCD_VERSION` , `FLANNEL_VERSION` and `K8S_VERSION` in build.sh, default etcd version is 2.0.9, flannel version is 0.4.0 and K8s version is 0.18.0.
 
 Please make sure that there are `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`, `kubelet`, `kube-proxy`, `etcd`, `etcdctl` and `flannel` in the binaries/master or binaries/minion directory.
 
@@ -48,7 +48,7 @@ export roles=("ai" "i" "i")
 
 export NUM_MINIONS=${NUM_MINIONS:-3}
 
-export PORTAL_NET=11.1.1.0/24
+export SERVICE_CLUSTER_IP_RANGE=11.1.1.0/24
 
 export FLANNEL_NET=172.16.0.0/16
 
@@ -61,7 +61,7 @@ Then the `roles ` variable defines the role of above machine in the same order, 
 
 The `NUM_MINIONS` variable defines the total number of minions.
 
-The `PORTAL_NET` variable defines the kubernetes service portal ip range. Please make sure that you do have a private ip range defined here.You can use below three private network range accordin to rfc1918. Besides you'd better not choose the one that conflicts with your own private network range.
+The `SERVICE_CLUSTER_IP_RANGE` variable defines the kubernetes service IP range. Please make sure that you do have a valid private ip range defined here, because some IaaS provider may reserve private ips. You can use below three private network range accordin to rfc1918. Besides you'd better not choose the one that conflicts with your own private network range.
 
      10.0.0.0        -   10.255.255.255  (10/8 prefix)
 
@@ -69,7 +69,7 @@ The `PORTAL_NET` variable defines the kubernetes service portal ip range. Please
 
      192.168.0.0     -   192.168.255.255 (192.168/16 prefix) 
 
-The `FLANNEL_NET` variable defines the IP range used for flannel overlay network, should not conflict with above PORTAL_NET range
+The `FLANNEL_NET` variable defines the IP range used for flannel overlay network, should not conflict with above `SERVICE_CLUSTER_IP_RANGE`.
 
 After all the above variable being set correctly. We can use below command in cluster/ directory to bring up the whole cluster.
 
@@ -92,18 +92,20 @@ If all things goes right, you will see the below message from console
 
 **All done !**
 
-You can also use kubectl command to see if the newly created k8s is working correctly. 
+You can also use `kubectl` command to see if the newly created k8s is working correctly. The `kubectl` binary is under the `cluster/ubuntu/binaries` directory. You can move it into your PATH. Then you can use the below command smoothly. 
 
-For example, use `$ kubectl get minions` to see if you get all your minion nodes comming up and ready. It may take some times for the minions be ready to use like below. 
+For example, use `$ kubectl get nodes` to see if all your minion nodes are in ready status. It may take some time for the minions ready to use like below. 
 
 ```
-NAME                 LABELS             STATUS
 
-10.10.103.162       <none>              Ready
+NAME            LABELS                                 STATUS
 
-10.10.103.223       <none>              Ready
+10.10.103.162   kubernetes.io/hostname=10.10.103.162   Ready
 
-10.10.103.250       <none>              Ready
+10.10.103.223   kubernetes.io/hostname=10.10.103.223   Ready
+
+10.10.103.250   kubernetes.io/hostname=10.10.103.250   Ready
+
 
 ```
 
@@ -127,7 +129,7 @@ DNS_DOMAIN="kubernetes.local"
 DNS_REPLICAS=1
 
 ```
-The `DNS_SERVER_IP` is defining the ip of dns server which must be in the portal_net range.
+The `DNS_SERVER_IP` is defining the ip of dns server which must be in the service_cluster_ip_range.
 
 The `DNS_REPLICAS` describes how many dns pod running in the cluster.
 

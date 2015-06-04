@@ -38,7 +38,7 @@ else
 fi
 
 # Additional parameters that are passed to ginkgo runner.
-GINKGO_TEST_ARGS=""
+GINKGO_TEST_ARGS=${GINKGO_TEST_ARGS:-""}
 
 if [[ "${PERFORMANCE:-}" == "true" ]]; then
     if [[ "${KUBERNETES_PROVIDER}" == "aws" ]]; then
@@ -204,7 +204,9 @@ fi
 cd kubernetes
 
 # Have cmd/e2e run by goe2e.sh generate JUnit report in ${WORKSPACE}/junit*.xml
-export E2E_REPORT_DIR=${WORKSPACE}
+ARTIFACTS=${WORKSPACE}/_artifacts
+mkdir -p ${ARTIFACTS}
+export E2E_REPORT_DIR=${ARTIFACTS}
 
 ### Set up ###
 if [[ "${E2E_UP,,}" == "true" ]]; then
@@ -220,7 +222,21 @@ if [[ "${E2E_TEST,,}" == "true" ]]; then
     go run ./hack/e2e.go ${E2E_OPT} -v --test --test_args="${GINKGO_TEST_ARGS}--ginkgo.noColor" || true
 fi
 
+# TODO(zml): We have a bunch of legacy Jenkins configs that are
+# expecting junit*.xml to be in ${WORKSPACE} root and it's Friday
+# afternoon, so just put the junit report where it's expected.
+for junit in ${ARTIFACTS}/junit*.xml; do
+  ln -s ${junit} ${WORKSPACE}
+done
+
 ### Clean up ###
 if [[ "${E2E_DOWN,,}" == "true" ]]; then
+    # Sleep before deleting the cluster to give the controller manager time to
+    # delete any cloudprovider resources still around from the last test.
+    # This is calibrated to allow enough time for 3 attempts to delete the
+    # resources. Each attempt is allocated 5 seconds for requests to the
+    # cloudprovider plus the processingRetryInterval from servicecontroller.go
+    # for the wait between attempts.
+    sleep 30
     go run ./hack/e2e.go ${E2E_OPT} -v --down
 fi

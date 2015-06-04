@@ -26,27 +26,35 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
 const (
-	image          = "gcr.io/google_containers/serve_hostname:1.1"
-	simulationTime = 20 * time.Minute
-	smallRCSize    = 5
-	mediumRCSize   = 30
-	bigRCSize      = 250
+	image             = "gcr.io/google_containers/serve_hostname:1.1"
+	simulationTime    = 10 * time.Minute
+	smallRCSize       = 5
+	mediumRCSize      = 30
+	bigRCSize         = 250
+	smallRCGroupName  = "load-test-small-rc"
+	mediumRCGroupName = "load-test-medium-rc"
+	bigRCGroupName    = "load-test-big-rc"
+	smallRCBatchSize  = 20
+	mediumRCBatchSize = 5
+	bigRCBatchSize    = 1
 )
 
 // This test suite can take a long time to run, so by default it is added to
 // the ginkgo.skip list (see driver.go).
 // To run this suite you must explicitly ask for it by setting the
 // -t/--test flag or ginkgo.focus flag.
-var _ = Describe("Load", func() {
+var _ = Describe("Load capacity", func() {
 	var c *client.Client
 	var nodeCount int
 	var ns string
+	var smallRCCount, mediumRCCount, bigRCCount int
 
 	BeforeEach(func() {
 		var err error
@@ -63,10 +71,21 @@ var _ = Describe("Load", func() {
 
 	// TODO add flag that allows to skip cleanup on failure
 	AfterEach(func() {
+		cleanRCGroup(c, ns, smallRCGroupName, smallRCSize, smallRCCount)
+		cleanRCGroup(c, ns, mediumRCGroupName, mediumRCSize, mediumRCCount)
+		cleanRCGroup(c, ns, bigRCGroupName, bigRCSize, bigRCCount)
+
 		By(fmt.Sprintf("Destroying namespace for this suite %v", ns))
 		if err := c.Namespaces().Delete(ns); err != nil {
 			Failf("Couldn't delete ns %s", err)
 		}
+
+		// Verify latency metrics
+		// TODO: Update threshold to 1s once we reach this goal
+		// TODO: We should reset metrics before the test. Currently previous tests influence latency metrics.
+		highLatencyRequests, err := HighLatencyRequests(c, 3*time.Second, util.NewStringSet("events"))
+		expectNoError(err, "Too many instances metrics above the threshold")
+		Expect(highLatencyRequests).NotTo(BeNumerically(">", 0))
 	})
 
 	type Load struct {
@@ -82,20 +101,26 @@ var _ = Describe("Load", func() {
 
 		It(name, func() {
 			totalPods := testArg.podsPerNode * nodeCount
-			smallRCCount, mediumRCCount, bigRCCount := computeRCCounts(totalPods)
+			smallRCCount, mediumRCCount, bigRCCount = computeRCCounts(totalPods)
 			threads := smallRCCount + mediumRCCount + bigRCCount
+
+			// TODO refactor this code to iterate over slice of RC group description.
+			createRCGroup(c, ns, smallRCGroupName, smallRCSize, smallRCCount, smallRCBatchSize)
+			createRCGroup(c, ns, mediumRCGroupName, mediumRCSize, mediumRCCount, mediumRCBatchSize)
+			createRCGroup(c, ns, bigRCGroupName, bigRCSize, bigRCCount, bigRCBatchSize)
+
+			// TODO add reseting latency metrics here, once it would be supported.
 
 			var wg sync.WaitGroup
 			wg.Add(threads)
 
 			// Run RC load for all kinds of RC.
-			runRCLoad(c, &wg, ns, "load-test-small-rc", smallRCSize, smallRCCount)
-			runRCLoad(c, &wg, ns, "load-test-medium-rc", mediumRCSize, mediumRCCount)
-			runRCLoad(c, &wg, ns, "load-test-big-rc", bigRCSize, bigRCCount)
+			runRCLoad(c, &wg, ns, smallRCGroupName, smallRCSize, smallRCCount)
+			runRCLoad(c, &wg, ns, mediumRCGroupName, mediumRCSize, mediumRCCount)
+			runRCLoad(c, &wg, ns, bigRCGroupName, bigRCSize, bigRCCount)
 
 			// Wait for all the pods from all the RC's to return.
 			wg.Wait()
-			// TODO verify latency metrics
 		})
 	}
 })
@@ -112,20 +137,33 @@ func computeRCCounts(total int) (int, int, int) {
 	return smallRCCount, mediumRCCount, bigRCCount
 }
 
-// The function creates a RC and then every few second resize it and with 0.1 probability deletes it.
+// The function every few second scales RC to a random size and with 0.1 probability deletes it.
+// Assumes that given RC exists.
 func playWithRC(c *client.Client, wg *sync.WaitGroup, ns, name string, size int) {
+	By(fmt.Sprintf("Playing with Replication Controller %v", name))
 	defer GinkgoRecover()
 	defer wg.Done()
-	rcExist := false
-	// Once every 1-2 minutes perform resize of RC.
+	// Wait some time to prevent from performing all operations at the same time.
+	time.Sleep(time.Duration(rand.Intn(60)) * time.Second)
+	rcExist := true
+	// Once every 1-2 minutes perform scale of RC.
 	for start := time.Now(); time.Since(start) < simulationTime; time.Sleep(time.Duration(60+rand.Intn(60)) * time.Second) {
 		if !rcExist {
-			expectNoError(RunRC(c, name, ns, image, size), fmt.Sprintf("creating rc %s in namespace %s", name, ns))
+			config := RCConfig{Client: c,
+				Name:      name,
+				Namespace: ns,
+				Image:     image,
+				Replicas:  size,
+			}
+			expectNoError(RunRC(config), fmt.Sprintf("creating rc %s in namespace %s", name, ns))
 			rcExist = true
 		}
-		// Resize RC to a random size between 0.5x and 1.5x of the original size.
+		// Scale RC to a random size between 0.5x and 1.5x of the original size.
 		newSize := uint(rand.Intn(size+1) + size/2)
-		expectNoError(ResizeRC(c, ns, name, newSize), fmt.Sprintf("resizing rc %s in namespace %s", name, ns))
+		expectNoError(ScaleRC(c, ns, name, newSize), fmt.Sprintf("scaling rc %s in namespace %s", name, ns))
+		// List all pods within this RC.
+		_, err := c.Pods(ns).List(labels.SelectorFromSet(labels.Set(map[string]string{"name": name})), fields.Everything())
+		expectNoError(err, fmt.Sprintf("listing pods from rc %v in namespace %v", name, ns))
 		// With probability 0.1 remove this RC.
 		if rand.Intn(10) == 0 {
 			expectNoError(DeleteRC(c, ns, name), fmt.Sprintf("deleting rc %s in namespace %s", name, ns))
@@ -138,8 +176,49 @@ func playWithRC(c *client.Client, wg *sync.WaitGroup, ns, name string, size int)
 }
 
 func runRCLoad(c *client.Client, wg *sync.WaitGroup, ns, groupName string, size, count int) {
-	By(fmt.Sprintf("Running %v Replication Controllers with size %v and playing with them", count, size))
 	for i := 1; i <= count; i++ {
 		go playWithRC(c, wg, ns, groupName+"-"+strconv.Itoa(i), size)
 	}
+}
+
+// Creates <count> RCs with size <size> in namespace <ns>. The requests are sent in batches of size <batchSize>.
+func createRCGroup(c *client.Client, ns, groupName string, size, count, batchSize int) {
+	By(fmt.Sprintf("Creating %v Replication Controllers with size %v", count, size))
+	for i := 1; i <= count; {
+		// Create up to <batchSize> RCs in parallel.
+		var wg sync.WaitGroup
+		for j := 1; j <= batchSize && i <= count; i, j = i+1, j+1 {
+			wg.Add(1)
+			go func(i int) {
+				defer GinkgoRecover()
+				defer wg.Done()
+				name := groupName + "-" + strconv.Itoa(i)
+				config := RCConfig{Client: c,
+					Name:      name,
+					Namespace: ns,
+					Image:     image,
+					Replicas:  size,
+				}
+				expectNoError(RunRC(config), fmt.Sprintf("creating rc %s in namespace %s for the first time", name, ns))
+			}(i)
+		}
+		wg.Wait()
+	}
+}
+
+// Removes group of RCs if not removed. This function is for cleanup purposes, so ignores errors.
+func cleanRCGroup(c *client.Client, ns, groupName string, size, count int) {
+	By(fmt.Sprintf("Removing %v Replication Controllers with size %v if not removed", count, size))
+	var wg sync.WaitGroup
+	wg.Add(count)
+	for i := 1; i <= count; i++ {
+		go func(i int) {
+			defer GinkgoRecover()
+			defer wg.Done()
+			name := groupName + "-" + strconv.Itoa(i)
+			// Since it is cleanup ignore any error.
+			DeleteRC(c, name, ns)
+		}(i)
+	}
+	wg.Wait()
 }

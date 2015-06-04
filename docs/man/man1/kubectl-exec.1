@@ -76,15 +76,15 @@ Execute a command in a container.
     Path to the kubeconfig file to use for CLI requests.
 
 .PP
-\fB\-\-log\_backtrace\_at\fP=:0
+\fB\-\-log\-backtrace\-at\fP=:0
     when logging hits line file:N, emit a stack trace
 
 .PP
-\fB\-\-log\_dir\fP=""
+\fB\-\-log\-dir\fP=""
     If non\-empty, write log files in this directory
 
 .PP
-\fB\-\-log\_flush\_frequency\fP=5s
+\fB\-\-log\-flush\-frequency\fP=5s
     Maximum number of seconds between log flushes
 
 .PP
@@ -141,11 +141,14 @@ Execute a command in a container.
 .RS
 
 .nf
+// get output from running 'date' from pod 123456\-7890, using the first container by default
+$ kubectl exec 123456\-7890 date
+	
 // get output from running 'date' in ruby\-container from pod 123456\-7890
-$ kubectl exec \-p 123456\-7890 \-c ruby\-container date
+$ kubectl exec 123456\-7890 \-c ruby\-container date
 
 //switch to raw terminal mode, sends stdin to 'bash' in ruby\-container from pod 123456\-780 and sends stdout/stderr from 'bash' back to the client
-$ kubectl exec \-p 123456\-7890 \-c ruby\-container \-i \-t \-\- bash \-il
+$ kubectl exec 123456\-7890 \-c ruby\-container \-i \-t \-\- bash \-il
 
 .fi
 .RE

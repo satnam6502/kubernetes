@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/algorithm/predicates"
+	"github.com/GoogleCloudPlatform/kubernetes/third_party/golang/expansion"
 	"github.com/golang/glog"
 
 	cadvisorApi "github.com/google/cadvisor/info/v1"
@@ -138,13 +139,18 @@ func NewMainKubelet(
 	containerRuntime string,
 	mounter mount.Interface,
 	dockerDaemonContainer string,
+	systemContainer string,
 	configureCBR0 bool,
-	pods int) (*Kubelet, error) {
+	pods int,
+	dockerExecHandler dockertools.ExecHandler) (*Kubelet, error) {
 	if rootDirectory == "" {
 		return nil, fmt.Errorf("invalid root directory %q", rootDirectory)
 	}
 	if resyncInterval <= 0 {
 		return nil, fmt.Errorf("invalid sync frequency %d", resyncInterval)
+	}
+	if systemContainer != "" && cgroupRoot == "" {
+		return nil, fmt.Errorf("invalid configuration: system container was specified and cgroup root was not specified")
 	}
 	dockerClient = dockertools.NewInstrumentedDockerInterface(dockerClient)
 
@@ -273,7 +279,8 @@ func NewMainKubelet(
 			klet.networkPlugin,
 			klet,
 			klet.httpClient,
-			newKubeletRuntimeHooks(recorder))
+			newKubeletRuntimeHooks(recorder),
+			dockerExecHandler)
 	case "rkt":
 		conf := &rkt.Config{InsecureSkipVerify: true}
 		rktRuntime, err := rkt.New(
@@ -294,7 +301,9 @@ func NewMainKubelet(
 		return nil, fmt.Errorf("unsupported container runtime %q specified", containerRuntime)
 	}
 
-	containerManager, err := newContainerManager(dockerDaemonContainer)
+	// Setup container manager, can fail if the devices hierarchy is not mounted
+	// (it is required by Docker however).
+	containerManager, err := newContainerManager(dockerDaemonContainer, systemContainer, resourceContainer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create the Container Manager: %v", err)
 	}
@@ -699,11 +708,19 @@ func (kl *Kubelet) initialNodeStatus() (*api.Node, error) {
 		}
 		// TODO(roberthbailey): Can we do this without having credentials to talk
 		// to the cloud provider?
-		instanceID, err := instances.ExternalID(kl.hostname)
+		// TODO: ExternalID is deprecated, we'll have to drop this code
+		externalID, err := instances.ExternalID(kl.hostname)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get instance ID from cloud provider: %v", err)
+			return nil, fmt.Errorf("failed to get external ID from cloud provider: %v", err)
 		}
-		node.Spec.ExternalID = instanceID
+		node.Spec.ExternalID = externalID
+		// TODO: We can't assume that the node has credentials to talk to the
+		// cloudprovider from arbitrary nodes. At most, we should talk to a
+		// local metadata server here.
+		node.Spec.ProviderID, err = cloudprovider.GetInstanceProviderID(kl.cloud, kl.hostname)
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		node.Spec.ExternalID = kl.hostname
 	}
@@ -854,7 +871,7 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 	return opts, nil
 }
 
-var masterServices = util.NewStringSet("kubernetes", "kubernetes-ro")
+var masterServices = util.NewStringSet("kubernetes")
 
 // getServiceEnvVarMap makes a map[string]string of env vars for services a pod in namespace ns should see
 func (kl *Kubelet) getServiceEnvVarMap(ns string) (map[string]string, error) {
@@ -876,7 +893,7 @@ func (kl *Kubelet) getServiceEnvVarMap(ns string) (map[string]string, error) {
 
 	// project the services in namespace ns onto the master services
 	for _, service := range services.Items {
-		// ignore services where PortalIP is "None" or empty
+		// ignore services where ClusterIP is "None" or empty
 		if !api.IsServiceIPSet(&service) {
 			continue
 		}
@@ -891,8 +908,7 @@ func (kl *Kubelet) getServiceEnvVarMap(ns string) (map[string]string, error) {
 			serviceMap[serviceName] = service
 		case kl.masterServiceNamespace:
 			if masterServices.Has(serviceName) {
-				_, exists := serviceMap[serviceName]
-				if !exists {
+				if _, exists := serviceMap[serviceName]; !exists {
 					serviceMap[serviceName] = service
 				}
 			}
@@ -926,20 +942,40 @@ func (kl *Kubelet) makeEnvironmentVariables(pod *api.Pod, container *api.Contain
 		return result, err
 	}
 
-	for _, value := range container.Env {
+	// Determine the final values of variables:
+	//
+	// 1.  Determine the final value of each variable:
+	//     a.  If the variable's Value is set, expand the `$(var)` references to other
+	//         variables in the .Value field; the sources of variables are the declared
+	//         variables of the container and the service environment variables
+	//     b.  If a source is defined for an environment variable, resolve the source
+	// 2.  Create the container's environment in the order variables are declared
+	// 3.  Add remaining service environment vars
+
+	tmpEnv := make(map[string]string)
+	mappingFunc := expansion.MappingFuncFor(tmpEnv, serviceEnv)
+	for _, envVar := range container.Env {
 		// Accesses apiserver+Pods.
 		// So, the master may set service env vars, or kubelet may.  In case both are doing
 		// it, we delete the key from the kubelet-generated ones so we don't have duplicate
 		// env vars.
 		// TODO: remove this net line once all platforms use apiserver+Pods.
-		delete(serviceEnv, value.Name)
+		delete(serviceEnv, envVar.Name)
 
-		runtimeValue, err := kl.runtimeEnvVarValue(value, pod)
-		if err != nil {
-			return result, err
+		runtimeVal := envVar.Value
+		if runtimeVal != "" {
+			// Step 1a: expand variable references
+			runtimeVal = expansion.Expand(runtimeVal, mappingFunc)
+		} else if envVar.ValueFrom != nil && envVar.ValueFrom.FieldRef != nil {
+			// Step 1b: resolve alternate env var sources
+			runtimeVal, err = kl.podFieldSelectorRuntimeValue(envVar.ValueFrom.FieldRef, pod)
+			if err != nil {
+				return result, err
+			}
 		}
 
-		result = append(result, kubecontainer.EnvVar{Name: value.Name, Value: runtimeValue})
+		tmpEnv[envVar.Name] = runtimeVal
+		result = append(result, kubecontainer.EnvVar{Name: envVar.Name, Value: tmpEnv[envVar.Name]})
 	}
 
 	// Append remaining service env vars.
@@ -947,24 +983,6 @@ func (kl *Kubelet) makeEnvironmentVariables(pod *api.Pod, container *api.Contain
 		result = append(result, kubecontainer.EnvVar{Name: k, Value: v})
 	}
 	return result, nil
-}
-
-// runtimeEnvVarValue determines the value that an env var should take when a container
-// is started.  If the value of the env var is the empty string, the source of the env var
-// is resolved, if one is specified.
-//
-// TODO: preliminary factoring; make better
-func (kl *Kubelet) runtimeEnvVarValue(envVar api.EnvVar, pod *api.Pod) (string, error) {
-	runtimeVal := envVar.Value
-	if runtimeVal != "" {
-		return runtimeVal, nil
-	}
-
-	if envVar.ValueFrom != nil && envVar.ValueFrom.FieldRef != nil {
-		return kl.podFieldSelectorRuntimeValue(envVar.ValueFrom.FieldRef, pod)
-	}
-
-	return runtimeVal, nil
 }
 
 func (kl *Kubelet) podFieldSelectorRuntimeValue(fs *api.ObjectFieldSelector, pod *api.Pod) (string, error) {
@@ -997,12 +1015,9 @@ func (kl *Kubelet) getClusterDNS(pod *api.Pod) ([]string, []string, error) {
 		dns = append([]string{kl.clusterDNS.String()}, hostDNS...)
 	}
 	if kl.clusterDomain != "" {
-		// TODO(vishh): Remove the oldNsDomain entry once the DNS crossover to inject
-		// "svc" is done.
-		oldNsDomain := fmt.Sprintf("%s.%s", pod.Namespace, kl.clusterDomain)
 		nsSvcDomain := fmt.Sprintf("%s.svc.%s", pod.Namespace, kl.clusterDomain)
 		svcDomain := fmt.Sprintf("svc.%s", kl.clusterDomain)
-		dnsSearch = append([]string{oldNsDomain, nsSvcDomain, svcDomain, kl.clusterDomain}, hostSearch...)
+		dnsSearch = append([]string{nsSvcDomain, svcDomain, kl.clusterDomain}, hostSearch...)
 	}
 	return dns, dnsSearch, nil
 }
@@ -1438,14 +1453,13 @@ func (s podsByCreationTime) Less(i, j int) bool {
 
 // checkHostPortConflicts detects pods with conflicted host ports.
 func checkHostPortConflicts(pods []*api.Pod) (fitting []*api.Pod, notFitting []*api.Pod) {
-	ports := map[int]bool{}
-	extract := func(p *api.ContainerPort) int { return p.HostPort }
+	ports := util.StringSet{}
 
 	// Respect the pod creation order when resolving conflicts.
 	sort.Sort(podsByCreationTime(pods))
 
 	for _, pod := range pods {
-		if errs := validation.AccumulateUniquePorts(pod.Spec.Containers, ports, extract); len(errs) != 0 {
+		if errs := validation.AccumulateUniqueHostPorts(pod.Spec.Containers, &ports); len(errs) != 0 {
 			glog.Errorf("Pod %q: HostPort is already allocated, ignoring: %v", kubecontainer.GetPodFullName(pod), errs)
 			notFitting = append(notFitting, pod)
 			continue
@@ -1656,10 +1670,10 @@ func (kl *Kubelet) validateContainerStatus(podStatus *api.PodStatus, containerNa
 		return "", fmt.Errorf("container %q not found in pod", containerName)
 	}
 	if previous {
-		if cStatus.LastTerminationState.Termination == nil {
+		if cStatus.LastTerminationState.Terminated == nil {
 			return "", fmt.Errorf("previous terminated container %q not found in pod", containerName)
 		}
-		cID = cStatus.LastTerminationState.Termination.ContainerID
+		cID = cStatus.LastTerminationState.Terminated.ContainerID
 	} else {
 		if cStatus.State.Waiting != nil {
 			return "", fmt.Errorf("container %q is in waiting state.", containerName)
@@ -1780,22 +1794,11 @@ func (kl *Kubelet) updateNodeStatus() error {
 	return fmt.Errorf("update node status exceeds retry count")
 }
 
-func (kl *Kubelet) recordNodeOnlineEvent() {
+func (kl *Kubelet) recordNodeStatusEvent(event string) {
+	glog.V(2).Infof("Recording %s event message for node %s", event, kl.hostname)
 	// TODO: This requires a transaction, either both node status is updated
 	// and event is recorded or neither should happen, see issue #6055.
-	kl.recorder.Eventf(kl.nodeRef, "online", "Node %s is now online", kl.hostname)
-}
-
-func (kl *Kubelet) recordNodeSchedulableEvent() {
-	// TODO: This requires a transaction, either both node status is updated
-	// and event is recorded or neither should happen, see issue #6055.
-	kl.recorder.Eventf(kl.nodeRef, "schedulable", "Node %s is now schedulable", kl.hostname)
-}
-
-func (kl *Kubelet) recordNodeUnschedulableEvent() {
-	// TODO: This requires a transaction, either both node status is updated
-	// and event is recorded or neither should happen, see issue #6055.
-	kl.recorder.Eventf(kl.nodeRef, "unschedulable", "Node %s is now unschedulable", kl.hostname)
+	kl.recorder.Eventf(kl.nodeRef, event, "Node %s status is now: %s", kl.hostname, event)
 }
 
 // Maintains Node.Spec.Unschedulable value from previous run of tryUpdateNodeStatus()
@@ -1835,7 +1838,9 @@ func (kl *Kubelet) setNodeStatus(node *api.Node) error {
 
 	networkConfigured := true
 	if kl.configureCBR0 {
-		if err := kl.reconcileCBR0(node.Spec.PodCIDR); err != nil {
+		if len(node.Spec.PodCIDR) == 0 {
+			networkConfigured = false
+		} else if err := kl.reconcileCBR0(node.Spec.PodCIDR); err != nil {
 			networkConfigured = false
 			glog.Errorf("Error configuring cbr0: %v", err)
 		}
@@ -1850,6 +1855,7 @@ func (kl *Kubelet) setNodeStatus(node *api.Node) error {
 		node.Status.Capacity = api.ResourceList{
 			api.ResourceCPU:    *resource.NewMilliQuantity(0, resource.DecimalSI),
 			api.ResourceMemory: resource.MustParse("0Gi"),
+			api.ResourcePods:   *resource.NewQuantity(int64(kl.pods), resource.DecimalSI),
 		}
 		glog.Errorf("Error getting machine info: %v", err)
 	} else {
@@ -1889,9 +1895,10 @@ func (kl *Kubelet) setNodeStatus(node *api.Node) error {
 	}()
 
 	currentTime := util.Now()
-	var newCondition api.NodeCondition
+	var newNodeReadyCondition api.NodeCondition
+	var oldNodeReadyConditionStatus api.ConditionStatus
 	if containerRuntimeUp && networkConfigured {
-		newCondition = api.NodeCondition{
+		newNodeReadyCondition = api.NodeCondition{
 			Type:              api.NodeReady,
 			Status:            api.ConditionTrue,
 			Reason:            "kubelet is posting ready status",
@@ -1905,7 +1912,7 @@ func (kl *Kubelet) setNodeStatus(node *api.Node) error {
 		if !networkConfigured {
 			reasons = append(reasons, "network not configured correctly")
 		}
-		newCondition = api.NodeCondition{
+		newNodeReadyCondition = api.NodeCondition{
 			Type:              api.NodeReady,
 			Status:            api.ConditionFalse,
 			Reason:            strings.Join(reasons, ","),
@@ -1916,25 +1923,32 @@ func (kl *Kubelet) setNodeStatus(node *api.Node) error {
 	updated := false
 	for i := range node.Status.Conditions {
 		if node.Status.Conditions[i].Type == api.NodeReady {
-			newCondition.LastTransitionTime = node.Status.Conditions[i].LastTransitionTime
-			if node.Status.Conditions[i].Status != api.ConditionTrue {
-				kl.recordNodeOnlineEvent()
+			oldNodeReadyConditionStatus = node.Status.Conditions[i].Status
+			if oldNodeReadyConditionStatus == newNodeReadyCondition.Status {
+				newNodeReadyCondition.LastTransitionTime = node.Status.Conditions[i].LastTransitionTime
+			} else {
+				newNodeReadyCondition.LastTransitionTime = currentTime
 			}
-			node.Status.Conditions[i] = newCondition
+			node.Status.Conditions[i] = newNodeReadyCondition
 			updated = true
 		}
 	}
 	if !updated {
-		newCondition.LastTransitionTime = currentTime
-		node.Status.Conditions = append(node.Status.Conditions, newCondition)
-		kl.recordNodeOnlineEvent()
+		newNodeReadyCondition.LastTransitionTime = currentTime
+		node.Status.Conditions = append(node.Status.Conditions, newNodeReadyCondition)
 	}
-
+	if !updated || oldNodeReadyConditionStatus != newNodeReadyCondition.Status {
+		if newNodeReadyCondition.Status == api.ConditionTrue {
+			kl.recordNodeStatusEvent("NodeReady")
+		} else {
+			kl.recordNodeStatusEvent("NodeNotReady")
+		}
+	}
 	if oldNodeUnschedulable != node.Spec.Unschedulable {
 		if node.Spec.Unschedulable {
-			kl.recordNodeUnschedulableEvent()
+			kl.recordNodeStatusEvent("NodeNotSchedulable")
 		} else {
-			kl.recordNodeSchedulableEvent()
+			kl.recordNodeStatusEvent("NodeSchedulable")
 		}
 		oldNodeUnschedulable = node.Spec.Unschedulable
 	}
@@ -1971,9 +1985,9 @@ func getPhase(spec *api.PodSpec, info []api.ContainerStatus) api.PodPhase {
 		if containerStatus, ok := api.GetContainerStatus(info, container.Name); ok {
 			if containerStatus.State.Running != nil {
 				running++
-			} else if containerStatus.State.Termination != nil {
+			} else if containerStatus.State.Terminated != nil {
 				stopped++
-				if containerStatus.State.Termination.ExitCode == 0 {
+				if containerStatus.State.Terminated.ExitCode == 0 {
 					succeeded++
 				} else {
 					failed++

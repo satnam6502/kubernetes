@@ -16,6 +16,7 @@ kubectl label \- Update the labels on a resource
 Update the labels on a resource.
 
 .PP
+A label must begin with a letter or number, and may contain letters, numbers, hyphens, dots, and underscores, up to 63 characters.
 If \-\-overwrite is true, then existing labels can be overwritten, otherwise attempting to overwrite a label will result in an error.
 If \-\-resource\-version is specified, then updates will use this resource version, otherwise the existing resource\-version will be used.
 
@@ -97,15 +98,15 @@ If \-\-resource\-version is specified, then updates will use this resource versi
     Path to the kubeconfig file to use for CLI requests.
 
 .PP
-\fB\-\-log\_backtrace\_at\fP=:0
+\fB\-\-log\-backtrace\-at\fP=:0
     when logging hits line file:N, emit a stack trace
 
 .PP
-\fB\-\-log\_dir\fP=""
+\fB\-\-log\-dir\fP=""
     If non\-empty, write log files in this directory
 
 .PP
-\fB\-\-log\_flush\_frequency\fP=5s
+\fB\-\-log\-flush\-frequency\fP=5s
     Maximum number of seconds between log flushes
 
 .PP

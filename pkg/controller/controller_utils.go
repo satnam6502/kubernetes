@@ -63,6 +63,7 @@ var expKeyFunc = func(obj interface{}) (string, error) {
 type RCExpectationsManager interface {
 	GetExpectations(rc *api.ReplicationController) (*PodExpectations, bool, error)
 	SatisfiedExpectations(rc *api.ReplicationController) bool
+	DeleteExpectations(rcKey string)
 	ExpectCreations(rc *api.ReplicationController, adds int) error
 	ExpectDeletions(rc *api.ReplicationController, dels int) error
 	CreationObserved(rc *api.ReplicationController)
@@ -84,6 +85,15 @@ func (r *RCExpectations) GetExpectations(rc *api.ReplicationController) (*PodExp
 		return podExp.(*PodExpectations), true, nil
 	} else {
 		return nil, false, err
+	}
+}
+
+// DeleteExpectations deletes the expectations of the given RC from the TTLStore.
+func (r *RCExpectations) DeleteExpectations(rcKey string) {
+	if podExp, exists, err := r.GetByKey(rcKey); err == nil && exists {
+		if err := r.Delete(podExp); err != nil {
+			glog.V(2).Infof("Error deleting expectations for rc %v: %v", rcKey, err)
+		}
 	}
 }
 
@@ -264,7 +274,7 @@ func (s activePods) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
 
 func (s activePods) Less(i, j int) bool {
 	// Unassigned < assigned
-	if s[i].Spec.Host == "" && s[j].Spec.Host != "" {
+	if s[i].Spec.NodeName == "" && s[j].Spec.NodeName != "" {
 		return true
 	}
 	// PodPending < PodUnknown < PodRunning

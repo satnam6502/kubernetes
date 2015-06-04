@@ -7,7 +7,6 @@
 .nav-back {
   /* :before */
   /* content: ""; */
-  background: url('assets/img/icons/arrow-back.png');
   background-size: 14px 14px;
   background-repeat: no-repeat;
   display: block;
@@ -219,7 +218,7 @@ md-select-menu {
   text-transform: none;
 }
 .md-button-toggle .md-toggle-icon {
-  background: transparent url(assets/img/icons/list_control_down.png) no-repeat center center;
+  background: transparent url(../img/icons/list_control_down.png) no-repeat center center;
   background-size: 100% auto;
   display: inline-block;
   height: 24px;
@@ -407,6 +406,17 @@ md-toolbar h1 {
   line-height: 40px;
   vertical-align: middle;
   padding: 2px;
+}
+md-select-menu.md-default-theme md-option:focus:not([selected]) {
+  background: #eeeeee;
+}
+md-select-menu md-option {
+  transition: box-shadow 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), background-color 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), -webkit-transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  transition: box-shadow 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), background-color 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+md-select-menu md-option:not([disabled]):hover,
+md-select-menu md-option:not([disabled]):focus {
+  background-color: rgba(158, 158, 158, 0.2);
 }
 .dashboard .body-wrapper {
   padding: 25px;
@@ -1505,4 +1515,7 @@ md-toolbar h1 {
 }
 .dashboard .detail .containerTable td {
   padding-right: 20px;
+}
+.dashboard .align-top tbody {
+  vertical-align: top;
 }

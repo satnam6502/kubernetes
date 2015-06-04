@@ -108,8 +108,10 @@ type KubeletServer struct {
 	CgroupRoot                     string
 	ContainerRuntime               string
 	DockerDaemonContainer          string
+	SystemContainer                string
 	ConfigureCBR0                  bool
 	MaxPods                        int
+	DockerExecHandlerName          string
 
 	// Flags intended for testing
 
@@ -149,7 +151,7 @@ func NewKubeletServer() *KubeletServer {
 		RegistryBurst:               10,
 		EnableDebuggingHandlers:     true,
 		MinimumGCAge:                1 * time.Minute,
-		MaxPerPodContainerCount:     5,
+		MaxPerPodContainerCount:     2,
 		MaxContainerCount:           100,
 		AuthPath:                    util.NewStringFlag("/var/lib/kubelet/kubernetes_auth"), // deprecated
 		KubeConfig:                  util.NewStringFlag("/var/lib/kubelet/kubeconfig"),
@@ -170,7 +172,9 @@ func NewKubeletServer() *KubeletServer {
 		CgroupRoot:                  "",
 		ContainerRuntime:            "docker",
 		DockerDaemonContainer:       "/docker-daemon",
+		SystemContainer:             "",
 		ConfigureCBR0:               false,
+		DockerExecHandlerName:       "native",
 	}
 }
 
@@ -203,7 +207,7 @@ func (s *KubeletServer) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&s.RunOnce, "runonce", s.RunOnce, "If true, exit after spawning pods from local manifests or remote urls. Exclusive with --api_servers, and --enable-server")
 	fs.BoolVar(&s.EnableDebuggingHandlers, "enable-debugging-handlers", s.EnableDebuggingHandlers, "Enables server endpoints for log collection and local running of containers and commands")
 	fs.DurationVar(&s.MinimumGCAge, "minimum-container-ttl-duration", s.MinimumGCAge, "Minimum age for a finished container before it is garbage collected.  Examples: '300ms', '10s' or '2h45m'")
-	fs.IntVar(&s.MaxPerPodContainerCount, "maximum-dead-containers-per-container", s.MaxPerPodContainerCount, "Maximum number of old instances of a container to retain per container.  Each container takes up some disk space.  Default: 5.")
+	fs.IntVar(&s.MaxPerPodContainerCount, "maximum-dead-containers-per-container", s.MaxPerPodContainerCount, "Maximum number of old instances of a container to retain per container.  Each container takes up some disk space.  Default: 2.")
 	fs.IntVar(&s.MaxContainerCount, "maximum-dead-containers", s.MaxContainerCount, "Maximum number of old instances of a containers to retain globally.  Each container takes up some disk space.  Default: 100.")
 	fs.Var(&s.AuthPath, "auth-path", "Path to .kubernetes_auth file, specifying how to authenticate to API server.")
 	fs.MarkDeprecated("auth-path", "will be removed in a future version")
@@ -228,9 +232,10 @@ func (s *KubeletServer) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&s.ResourceContainer, "resource-container", s.ResourceContainer, "Absolute name of the resource-only container to create and run the Kubelet in (Default: /kubelet).")
 	fs.StringVar(&s.CgroupRoot, "cgroup_root", s.CgroupRoot, "Optional root cgroup to use for pods. This is handled by the container runtime on a best effort basis. Default: '', which means use the container runtime default.")
 	fs.StringVar(&s.ContainerRuntime, "container_runtime", s.ContainerRuntime, "The container runtime to use. Possible values: 'docker', 'rkt'. Default: 'docker'.")
-	fs.StringVar(&s.DockerDaemonContainer, "docker-daemon-container", s.DockerDaemonContainer, "Optional resource-only container in which to place the Docker Daemon. Empty for no container (Default: /docker-daemon).")
+	fs.StringVar(&s.SystemContainer, "system-container", s.SystemContainer, "Optional resource-only container in which to place all non-kernel processes that are not already in a container. Empty for no container. Rolling back the flag requires a reboot. (Default: \"\").")
 	fs.BoolVar(&s.ConfigureCBR0, "configure-cbr0", s.ConfigureCBR0, "If true, kubelet will configure cbr0 based on Node.Spec.PodCIDR.")
 	fs.IntVar(&s.MaxPods, "max-pods", 100, "Number of Pods that can run on this Kubelet.")
+	fs.StringVar(&s.DockerExecHandlerName, "docker-exec-handler", s.DockerExecHandlerName, "Handler to use when executing a command in a container. Valid values are 'native' and 'nsenter'. Defaults to 'native'.")
 
 	// Flags intended for testing, not recommended used in production environments.
 	fs.BoolVar(&s.ReallyCrashForTesting, "really-crash-for-testing", s.ReallyCrashForTesting, "If true, when panics occur crash. Intended for testing.")
@@ -304,6 +309,17 @@ func (s *KubeletServer) Run(_ []string) error {
 		mounter = &mount.NsenterMounter{}
 	}
 
+	var dockerExecHandler dockertools.ExecHandler
+	switch s.DockerExecHandlerName {
+	case "native":
+		dockerExecHandler = &dockertools.NativeExecHandler{}
+	case "nsenter":
+		dockerExecHandler = &dockertools.NsenterExecHandler{}
+	default:
+		glog.Warningf("Unknown Docker exec handler %q; defaulting to native", s.DockerExecHandlerName)
+		dockerExecHandler = &dockertools.NativeExecHandler{}
+	}
+
 	kcfg := KubeletConfig{
 		Address:                        s.Address,
 		AllowPrivileged:                s.AllowPrivileged,
@@ -347,8 +363,10 @@ func (s *KubeletServer) Run(_ []string) error {
 		ContainerRuntime:          s.ContainerRuntime,
 		Mounter:                   mounter,
 		DockerDaemonContainer:     s.DockerDaemonContainer,
+		SystemContainer:           s.SystemContainer,
 		ConfigureCBR0:             s.ConfigureCBR0,
 		MaxPods:                   s.MaxPods,
+		DockerExecHandler:         dockerExecHandler,
 	}
 
 	if err := RunKubelet(&kcfg, nil); err != nil {
@@ -495,7 +513,7 @@ func SimpleKubelet(client *client.Client,
 		FileCheckFrequency:      1 * time.Second,
 		SyncFrequency:           3 * time.Second,
 		MinimumGCAge:            10 * time.Second,
-		MaxPerPodContainerCount: 5,
+		MaxPerPodContainerCount: 2,
 		MaxContainerCount:       100,
 		RegisterNode:            true,
 		MasterServiceNamespace:  masterServiceNamespace,
@@ -513,7 +531,9 @@ func SimpleKubelet(client *client.Client,
 		ContainerRuntime:          "docker",
 		Mounter:                   mount.New(),
 		DockerDaemonContainer:     "/docker-daemon",
+		SystemContainer:           "",
 		MaxPods:                   32,
+		DockerExecHandler:         &dockertools.NativeExecHandler{},
 	}
 	return &kcfg
 }
@@ -648,8 +668,10 @@ type KubeletConfig struct {
 	ContainerRuntime               string
 	Mounter                        mount.Interface
 	DockerDaemonContainer          string
+	SystemContainer                string
 	ConfigureCBR0                  bool
 	MaxPods                        int
+	DockerExecHandler              dockertools.ExecHandler
 }
 
 func createAndInitKubelet(kc *KubeletConfig) (k KubeletBootstrap, pc *config.PodConfig, err error) {
@@ -701,8 +723,10 @@ func createAndInitKubelet(kc *KubeletConfig) (k KubeletBootstrap, pc *config.Pod
 		kc.ContainerRuntime,
 		kc.Mounter,
 		kc.DockerDaemonContainer,
+		kc.SystemContainer,
 		kc.ConfigureCBR0,
-		kc.MaxPods)
+		kc.MaxPods,
+		kc.DockerExecHandler)
 
 	if err != nil {
 		return nil, nil, err

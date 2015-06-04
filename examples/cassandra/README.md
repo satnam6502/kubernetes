@@ -26,7 +26,7 @@ spec:
     - /run.sh
     resources:
       limits:
-        cpu: "1"      
+        cpu: "1"
     image: kubernetes/cassandra:v2
     name: cassandra
     ports:
@@ -76,15 +76,15 @@ Here is the service description:
 ```yaml
 apiVersion: v1beta3
 kind: Service
-metadata: 
-  labels: 
+metadata:
+  labels:
     name: cassandra
   name: cassandra
-spec: 
+spec:
   ports:
     - port: 9042
       targetPort: 9042
-  selector: 
+  selector:
     name: cassandra
 ```
 
@@ -125,7 +125,7 @@ subsets:
 You can see that the _Service_ has found the pod we created in step one.
 
 ### Adding replicated nodes
-Of course, a single node cluster isn't particularly interesting.  The real power of Kubernetes and Cassandra lies in easily building a replicated, resizable Cassandra cluster.
+Of course, a single node cluster isn't particularly interesting.  The real power of Kubernetes and Cassandra lies in easily building a replicated, scalable Cassandra cluster.
 
 In Kubernetes a _Replication Controller_ is responsible for replicating sets of identical pods.  Like a _Service_ it has a selector query which identifies the members of it's set.  Unlike a _Service_ it also has a desired number of replicas, and it will create or delete _Pods_ to ensure that the number of _Pods_ matches up with it's desired state.
 
@@ -134,26 +134,26 @@ Replication Controllers will "adopt" existing pods that match their selector que
 ```yaml
 apiVersion: v1beta3
 kind: ReplicationController
-metadata: 
-  labels: 
+metadata:
+  labels:
     name: cassandra
   name: cassandra
-spec: 
+spec:
   replicas: 1
-  selector: 
+  selector:
     name: cassandra
-  template: 
-    metadata: 
-      labels: 
+  template:
+    metadata:
+      labels:
         name: cassandra
-    spec: 
-      containers: 
-        - command: 
+    spec:
+      containers:
+        - command:
             - /run.sh
           resources:
             limits:
               cpu: 1
-          env: 
+          env:
             - name: MAX_HEAP_SIZE
               key: MAX_HEAP_SIZE
               value: 512M
@@ -162,15 +162,15 @@ spec:
               value: 100M
           image: "kubernetes/cassandra:v2"
           name: cassandra
-          ports: 
+          ports:
             - containerPort: 9042
               name: cql
             - containerPort: 9160
               name: thrift
-          volumeMounts: 
+          volumeMounts:
             - mountPath: /cassandra_data
               name: data
-      volumes: 
+      volumes:
         - name: data
           emptyDir: {}
 ```
@@ -185,9 +185,9 @@ $ kubectl create -f cassandra-controller.yaml
 
 Now this is actually not that interesting, since we haven't actually done anything new.  Now it will get interesting.
 
-Let's resize our cluster to 2:
+Let's scale our cluster to 2:
 ```sh
-$ kubectl resize rc cassandra --replicas=2
+$ kubectl scale rc cassandra --replicas=2
 ```
 
 Now if you list the pods in your cluster, you should see two cassandra pods:
@@ -195,10 +195,10 @@ Now if you list the pods in your cluster, you should see two cassandra pods:
 ```sh
 $ kubectl get pods
 POD                 IP              CONTAINER(S)   IMAGE(S)                 HOST                                    LABELS           STATUS    CREATED      MESSAGE
-cassandra           10.244.3.3                                              kubernetes-minion-sft2/104.197.42.181   name=cassandra   Running   7 minutes        
-                                    cassandra      kubernetes/cassandra:v2                                                           Running   7 minutes        
-cassandra-gnhk8     10.244.0.5                                              kubernetes-minion-dqz3/104.197.2.71     name=cassandra   Running   About a minute   
-                                    cassandra      kubernetes/cassandra:v2                                                           Running   51 seconds       
+cassandra           10.244.3.3                                              kubernetes-minion-sft2/104.197.42.181   name=cassandra   Running   7 minutes
+                                    cassandra      kubernetes/cassandra:v2                                                           Running   7 minutes
+cassandra-gnhk8     10.244.0.5                                              kubernetes-minion-dqz3/104.197.2.71     name=cassandra   Running   About a minute
+                                    cassandra      kubernetes/cassandra:v2                                                           Running   51 seconds
 
 ```
 
@@ -218,9 +218,9 @@ UN  10.244.0.5  74.09 KB   256     100.0%            86feda0f-f070-4a5b-bda1-2ee
 UN  10.244.3.3  51.28 KB   256     100.0%            dafe3154-1d67-42e1-ac1d-78e7e80dce2b  rack1
 ```
 
-Now let's resize our cluster to 4 nodes:
+Now let's scale our cluster to 4 nodes:
 ```sh
-$ kubectl resize rc cassandra --replicas=4
+$ kubectl scale rc cassandra --replicas=4
 ```
 
 Examining the status again:
@@ -251,115 +251,18 @@ kubectl create -f cassandra-service.yaml
 kubectl create -f cassandra-controller.yaml
 
 # scale up to 2 nodes
-kubectl resize rc cassandra --replicas=2
+kubectl scale rc cassandra --replicas=2
 
 # validate the cluster
 docker exec <container-id> nodetool status
 
 # scale up to 4 nodes
-kubectl resize rc cassandra --replicas=4
+kubectl scale rc cassandra --replicas=4
 ```
 
 ### Seed Provider Source
-```java
-package io.k8s.cassandra;
 
-import java.io.IOException;
-import java.net.InetAddress;
-import java.net.UnknownHostException;
-import java.net.URL;
-import java.net.URLConnection;
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
-import java.security.SecureRandom;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-
-import org.codehaus.jackson.JsonNode;
-import org.codehaus.jackson.annotate.JsonIgnoreProperties;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.apache.cassandra.locator.SeedProvider;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-public class KubernetesSeedProvider implements SeedProvider {
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    static class Endpoints {
-        public String[] endpoints;
-    }
-    
-    private static String getEnvOrDefault(String var, String def) {
-        String val = System.getenv(var);
-        if (val == null) {
-	    val = def;
-        }
-        return val;
-    }
-
-    private static final Logger logger = LoggerFactory.getLogger(KubernetesSeedProvider.class);
-
-    private List defaultSeeds;
-   
-    public KubernetesSeedProvider(Map<String, String> params) {
-        // Taken from SimpleSeedProvider.java
-        // These are used as a fallback, if we get nothing from k8s.
-        String[] hosts = params.get("seeds").split(",", -1);
-        defaultSeeds = new ArrayList<InetAddress>(hosts.length);
-        for (String host : hosts)
-	    {
-		try {
-		    defaultSeeds.add(InetAddress.getByName(host.trim()));
-		}
-		catch (UnknownHostException ex)
-		    {
-			// not fatal... DD will bark if there end up being zero seeds.
-			logger.warn("Seed provider couldn't lookup host " + host);
-		    }
-	    }
-    } 
-
-    public List<InetAddress> getSeeds() {
-        List<InetAddress> list = new ArrayList<InetAddress>();
-        String protocol = getEnvOrDefault("KUBERNETES_API_PROTOCOL", "http");
-        String hostName = getEnvOrDefault("KUBERNETES_RO_SERVICE_HOST", "localhost");
-        String hostPort = getEnvOrDefault("KUBERNETES_RO_SERVICE_PORT", "8080");
-
-        String host = protocol + "://" + hostName + ":" + hostPort;
-        String serviceName = getEnvOrDefault("CASSANDRA_SERVICE", "cassandra");
-        String path = "/api/v1beta3/endpoints/";
-        try {
-	    URL url = new URL(host + path + serviceName);
-	    ObjectMapper mapper = new ObjectMapper();
-	    Endpoints endpoints = mapper.readValue(url, Endpoints.class);
-	    if (endpoints != null) {
-            // Here is a problem point, endpoints.endpoints can be null in first node cases.
-            if (endpoints.endpoints != null){
-		for (String endpoint : endpoints.endpoints) {
-		    String[] parts = endpoint.split(":");
-		    list.add(InetAddress.getByName(parts[0]));
-		}
-            }
-	    }
-        } catch (IOException ex) {
-	    logger.warn("Request to kubernetes apiserver failed"); 
-        }
-        if (list.size() == 0) {
-	    // If we got nothing, we might be the first instance, in that case
-	    // fall back on the seeds that were passed in cassandra.yaml.
-	    return defaultSeeds;
-        }
-        return list;
-    }
-
-    // Simple main to test the implementation
-    public static void main(String[] args) {
-        SeedProvider provider = new KubernetesSeedProvider(new HashMap<String, String>());
-        System.out.println(provider.getSeeds());
-    }
-}
-```
-
+See
+[here](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/examples/cassandra/java/src/io/k8s/cassandra/KubernetesSeedProvider.java).
 
 [![Analytics](https://kubernetes-site.appspot.com/UA-36037335-10/GitHub/examples/cassandra/README.md?pixel)]()

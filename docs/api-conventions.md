@@ -189,7 +189,7 @@ These are verbs which change the fundamental type of data returned (watch return
 
 Two additional verbs `redirect` and `proxy` provide access to cluster resources as described in [accessing-the-cluster.md](accessing-the-cluster.md).
 
-When resources wish to expose alternative actions that are closely coupled to a single resource, they should do so using new sub-resources. An example is allowing automated processes to update the "status" field of a Pod. The `/pods` endpoint only allows updates to "metadata" and "spec", since those reflect end-user intent. An automated process should be able to modify status for users to see by sending an updated Pod kind to the server to the "/pods/&lt;name&gt;/status" endpoint - the alternate endpoint allows different rules to be applied to the update, and access to be appropriately restricted. Likewise, some actions like "stop" or "resize" are best represented as REST sub-resources that are POSTed to.  The POST action may require a simple kind to be provided if the action requires parameters, or function without a request body.
+When resources wish to expose alternative actions that are closely coupled to a single resource, they should do so using new sub-resources. An example is allowing automated processes to update the "status" field of a Pod. The `/pods` endpoint only allows updates to "metadata" and "spec", since those reflect end-user intent. An automated process should be able to modify status for users to see by sending an updated Pod kind to the server to the "/pods/&lt;name&gt;/status" endpoint - the alternate endpoint allows different rules to be applied to the update, and access to be appropriately restricted. Likewise, some actions like "stop" or "scale" are best represented as REST sub-resources that are POSTed to.  The POST action may require a simple kind to be provided if the action requires parameters, or function without a request body.
 
 TODO: more documentation of Watch
 
@@ -201,7 +201,7 @@ The API supports three different PATCH operations, determined by their correspon
  * As defined in [RFC6902](https://tools.ietf.org/html/rfc6902), a JSON Patch is a sequence of operations that are executed on the resource, e.g. `{"op": "add", "path": "/a/b/c", "value": [ "foo", "bar" ]}`. For more details on how to use JSON Patch, see the RFC.
 * Merge Patch, `Content-Type: application/merge-json-patch+json`
  * As defined in [RFC7386](https://tools.ietf.org/html/rfc7386), a Merge Patch is essentially a partial representation of the resource. The submitted JSON is "merged" with the current resource to create a new one, then the new one is saved. For more details on how to use Merge Patch, see the RFC.
-* Strategic Merge Patch, `Content-Type: application/strategic-merge-json-patch+json`
+* Strategic Merge Patch, `Content-Type: application/strategic-merge-patch+json`
  * Strategic Merge Patch is a custom implementation of Merge Patch. For a detailed explanation of how it works and why it needed to be introduced, see below.
 
 #### Strategic Merge Patch
@@ -218,7 +218,7 @@ spec:
 ...and we POST that to the server (as JSON). Then let's say we want to *add* a container to this Pod.
 
 ```yaml
-PATCH /v1beta1/pod
+PATCH /api/v1beta3/namespaces/default/pods/pod-name
 spec:
   containers:
     - name: log-tailer
@@ -301,7 +301,7 @@ Late Initialization
 Late initialization is when resource fields are set by a system controller
 after an object is created/updated.
 
-For example, the scheduler sets the pod.spec.host field after the pod is created.
+For example, the scheduler sets the pod.spec.nodeName field after the pod is created.
 
 Late-initializers should only make the following types of modifications:
   - Setting previously unset fields
@@ -460,26 +460,33 @@ A ```Status``` kind will be returned by the API in two cases:
 The status object is encoded as JSON and provided as the body of the response.  The status object contains fields for humans and machine consumers of the API to get more detailed information for the cause of the failure. The information in the status object supplements, but does not override, the HTTP status code's meaning. When fields in the status object have the same meaning as generally defined HTTP headers and that header is returned with the response, the header should be considered as having higher priority.
 
 **Example:**
-```JSON
->HTTP Requst:
-POST /api/v1beta1/events/ HTTP/1.1
-Authorization: Basic ...
+```
+$ curl -v -k -H "Authorization: Bearer WhCDvq4VPpYhrcfmF6ei7V9qlbqTubUc" https://10.240.122.184:443/api/v1beta3/namespaces/default/pods/grafana
 
-{empty body}
+> GET /api/v1beta3/namespaces/default/pods/grafana HTTP/1.1
+> User-Agent: curl/7.26.0
+> Host: 10.240.122.184
+> Accept: */*
+> Authorization: Bearer WhCDvq4VPpYhrcfmF6ei7V9qlbqTubUc
+> 
 
->HTTP Response:
-HTTP/1.1 500 Internal Server Error
-Server: nginx/1.2.1
-Content-Type: application/json
-Content-Length: 144
-
+< HTTP/1.1 404 Not Found
+< Content-Type: application/json
+< Date: Wed, 20 May 2015 18:10:42 GMT
+< Content-Length: 232
+< 
 {
   "kind": "Status",
-  "creationTimestamp": null,
-  "apiVersion": "v1beta1",
+  "apiVersion": "v1beta3",
+  "metadata": {},
   "status": "Failure",
-  "message": "empty input",
-  "code": 500
+  "message": "pods \"grafana\" not found",
+  "reason": "NotFound",
+  "details": {
+    "id": "grafana",
+    "kind": "pods"
+  },
+  "code": 404
 }
 ```
 

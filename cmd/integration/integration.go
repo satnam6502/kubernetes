@@ -37,7 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	apierrors "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
@@ -81,8 +80,8 @@ func (fakeKubeletClient) GetConnectionInfo(host string) (string, uint, http.Roun
 	return "", 0, nil, errors.New("Not Implemented")
 }
 
-func (fakeKubeletClient) HealthCheck(host string) (probe.Result, error) {
-	return probe.Success, nil
+func (fakeKubeletClient) HealthCheck(host string) (probe.Result, string, error) {
+	return probe.Success, "", nil
 }
 
 type delegateHandler struct {
@@ -163,7 +162,6 @@ func startComponents(firstManifestURL, secondManifestURL, apiVersion string) (st
 		Authorizer:            apiserver.NewAlwaysAllowAuthorizer(),
 		AdmissionControl:      admit.NewAlwaysAdmit(),
 		ReadWritePort:         portNumber,
-		ReadOnlyPort:          portNumber,
 		PublicAddress:         publicAddress,
 		CacheTimeout:          2 * time.Second,
 	})
@@ -177,6 +175,7 @@ func startComponents(firstManifestURL, secondManifestURL, apiVersion string) (st
 	}
 	eventBroadcaster := record.NewBroadcaster()
 	schedulerConfig.Recorder = eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"})
+	eventBroadcaster.StartLogging(glog.Infof)
 	eventBroadcaster.StartRecordingToSink(cl.Events(""))
 	scheduler.New(schedulerConfig).Run()
 
@@ -189,15 +188,9 @@ func startComponents(firstManifestURL, secondManifestURL, apiVersion string) (st
 	// TODO: Write an integration test for the replication controllers watch.
 	go controllerManager.Run(3, util.NeverStop)
 
-	nodeResources := &api.NodeResources{
-		Capacity: api.ResourceList{
-			api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
-			api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
-		}}
-
-	nodeController := nodecontroller.NewNodeController(nil, "", nodeResources, cl, 10, 5*time.Minute, util.NewFakeRateLimiter(),
+	nodeController := nodecontroller.NewNodeController(nil, cl, 10, 5*time.Minute, nodecontroller.NewPodEvictor(util.NewFakeRateLimiter()),
 		40*time.Second, 60*time.Second, 5*time.Second, nil, false)
-	nodeController.Run(5*time.Second, true)
+	nodeController.Run(5 * time.Second)
 	cadvisorInterface := new(cadvisor.Fake)
 
 	// Kubelet (localhost)
@@ -244,8 +237,8 @@ func podsOnMinions(c *client.Client, podNamespace string, labelSelector labels.S
 		for i := range pods.Items {
 			pod := pods.Items[i]
 			podString := fmt.Sprintf("%q/%q", pod.Namespace, pod.Name)
-			glog.Infof("Check whether pod %q exists on node %q", podString, pod.Spec.Host)
-			if len(pod.Spec.Host) == 0 {
+			glog.Infof("Check whether pod %q exists on node %q", podString, pod.Spec.NodeName)
+			if len(pod.Spec.NodeName) == 0 {
 				glog.Infof("Pod %q is not bound to a host yet", podString)
 				return false, nil
 			}
@@ -612,24 +605,24 @@ func runPatchTest(c *client.Client) {
 		RemoveLabelBody     []byte
 		RemoveAllLabelsBody []byte
 	}{
-		"v1beta1": {
+		"v1beta3": {
 			api.JSONPatchType: {
-				[]byte(`[{"op":"add","path":"/labels","value":{"foo":"bar","baz":"qux"}}]`),
-				[]byte(`[{"op":"remove","path":"/labels/foo"}]`),
-				[]byte(`[{"op":"remove","path":"/labels"}]`),
+				[]byte(`[{"op":"add","path":"/metadata/labels","value":{"foo":"bar","baz":"qux"}}]`),
+				[]byte(`[{"op":"remove","path":"/metadata/labels/foo"}]`),
+				[]byte(`[{"op":"remove","path":"/metadata/labels"}]`),
 			},
 			api.MergePatchType: {
-				[]byte(`{"labels":{"foo":"bar","baz":"qux"}}`),
-				[]byte(`{"labels":{"foo":null}}`),
-				[]byte(`{"labels":null}`),
+				[]byte(`{"metadata":{"labels":{"foo":"bar","baz":"qux"}}}`),
+				[]byte(`{"metadata":{"labels":{"foo":null}}}`),
+				[]byte(`{"metadata":{"labels":null}}`),
 			},
 			api.StrategicMergePatchType: {
-				[]byte(`{"labels":{"foo":"bar","baz":"qux"}}`),
-				[]byte(`{"labels":{"foo":null}}`),
-				[]byte(`{"labels":{"$patch":"replace"}}`),
+				[]byte(`{"metadata":{"labels":{"foo":"bar","baz":"qux"}}}`),
+				[]byte(`{"metadata":{"labels":{"foo":null}}}`),
+				[]byte(`{"metadata":{"labels":{"$patch":"replace"}}}`),
 			},
 		},
-		"v1beta3": {
+		"v1": {
 			api.JSONPatchType: {
 				[]byte(`[{"op":"add","path":"/metadata/labels","value":{"foo":"bar","baz":"qux"}}]`),
 				[]byte(`[{"op":"remove","path":"/metadata/labels/foo"}]`),
@@ -709,15 +702,12 @@ func runMasterServiceTest(client *client.Client) {
 	if err != nil {
 		glog.Fatalf("unexpected error listing services: %v", err)
 	}
-	var foundRW, foundRO bool
+	var foundRW bool
 	found := util.StringSet{}
 	for i := range svcList.Items {
 		found.Insert(svcList.Items[i].Name)
 		if svcList.Items[i].Name == "kubernetes" {
 			foundRW = true
-		}
-		if svcList.Items[i].Name == "kubernetes-ro" {
-			foundRO = true
 		}
 	}
 	if foundRW {
@@ -730,20 +720,7 @@ func runMasterServiceTest(client *client.Client) {
 		}
 	} else {
 		glog.Errorf("no RW service found: %v", found)
-	}
-	if foundRO {
-		ep, err := client.Endpoints(api.NamespaceDefault).Get("kubernetes-ro")
-		if err != nil {
-			glog.Fatalf("unexpected error listing endpoints for kubernetes service: %v", err)
-		}
-		if countEndpoints(ep) == 0 {
-			glog.Fatalf("no endpoints for kubernetes service: %v", ep)
-		}
-	} else {
-		glog.Errorf("no RO service found: %v", found)
-	}
-	if !foundRW || !foundRO {
-		glog.Fatalf("Kubernetes service test failed: %v", found)
+		glog.Fatal("Kubernetes service test failed")
 	}
 	glog.Infof("Master service test passed.")
 }
@@ -856,7 +833,7 @@ func runServiceTest(client *client.Client) {
 	for _, svc := range svcList.Items {
 		names.Insert(fmt.Sprintf("%s/%s", svc.Namespace, svc.Name))
 	}
-	if !names.HasAll("default/kubernetes", "default/kubernetes-ro", "default/service1", "default/service2", "other/service1") {
+	if !names.HasAll("default/kubernetes", "default/service1", "default/service2", "other/service1") {
 		glog.Fatalf("Unexpected service list: %#v", names)
 	}
 
@@ -912,7 +889,7 @@ func runSchedulerNoPhantomPodsTest(client *client.Client) {
 	if err != nil {
 		glog.Fatalf("Failed to create pod: %v, %v", pod, err)
 	}
-	if err := wait.Poll(time.Second, time.Second*30, podRunning(client, baz.Namespace, baz.Name)); err != nil {
+	if err := wait.Poll(time.Second, time.Second*60, podRunning(client, baz.Namespace, baz.Name)); err != nil {
 		glog.Fatalf("FAILED: (Scheduler probably didn't process deletion of 'phantom.bar') Pod never started running: %v", err)
 	}
 
@@ -945,7 +922,7 @@ func main() {
 	glog.Infof("Running tests for APIVersion: %s", apiVersion)
 
 	firstManifestURL := ServeCachedManifestFile(testPodSpecFile)
-	secondManifestURL := ServeCachedManifestFile(testManifestFile)
+	secondManifestURL := ServeCachedManifestFile(testPodSpecFile)
 	apiServerURL, _ := startComponents(firstManifestURL, secondManifestURL, apiVersion)
 
 	// Ok. we're good to go.
@@ -1065,28 +1042,4 @@ const (
 			"volumes": [{	"name": "redis-data" }]
 		}
 	}`
-)
-
-const (
-	// This is copied from, and should be kept in sync with:
-	// https://raw.githubusercontent.com/GoogleCloudPlatform/container-vm-guestbook-redis-python/master/manifest.yaml
-	// Note that kubelet complains about these containers not having a self link.
-	testManifestFile = `version: v1beta2
-id: container-vm-guestbook-manifest
-containers:
-  - name: redis
-    image: redis
-    volumeMounts:
-      - name: redis-data
-        mountPath: /data
-
-  - name: guestbook
-    image: google/guestbook-python-redis
-    ports:
-      - name: www
-        hostPort: 80
-        containerPort: 80
-
-volumes:
-  - name: redis-data`
 )

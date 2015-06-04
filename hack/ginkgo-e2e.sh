@@ -77,14 +77,23 @@ else
   )
 fi
 
+if [[ -n "${NODE_INSTANCE_PREFIX:-}" ]]; then
+  NODE_INSTANCE_GROUP="${NODE_INSTANCE_PREFIX}-group"
+else
+  NODE_INSTANCE_GROUP=""
+fi
+
 ginkgo_args=()
 if [[ ${GINKGO_PARALLEL} =~ ^[yY]$ ]]; then
   ginkgo_args+=("-p")
 fi
 
+
 # The --host setting is used only when providing --auth_config
 # If --kubeconfig is used, the host to use is retrieved from the .kubeconfig
 # file and the one provided with --host is ignored.
+# Add path for things like running kubectl binary.
+export PATH=$(dirname "${e2e_test}"):"${PATH}"
 "${ginkgo}" "${ginkgo_args[@]:+${ginkgo_args[@]}}" "${e2e_test}" -- \
   "${auth_config[@]:+${auth_config[@]}}" \
   --host="https://${KUBE_MASTER_IP-}" \
@@ -92,6 +101,9 @@ fi
   --gce-project="${PROJECT:-}" \
   --gce-zone="${ZONE:-}" \
   --kube-master="${KUBE_MASTER:-}" \
+  --cluster-tag="${CLUSTER_ID:-}" \
   --repo-root="${KUBE_VERSION_ROOT}" \
+  --node-instance-group="${NODE_INSTANCE_GROUP:-}" \
+  --num-nodes="${NUM_MINIONS:-}" \
   ${E2E_REPORT_DIR+"--report-dir=${E2E_REPORT_DIR}"} \
   "${@:-}"

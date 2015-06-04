@@ -31,7 +31,7 @@ will be lost along with the rest of the resource.
 .SH OPTIONS
 .PP
 \fB\-\-all\fP=false
-    [\-all] to select all the specified resources
+    [\-all] to select all the specified resources.
 
 .PP
 \fB\-\-cascade\fP=true
@@ -39,7 +39,7 @@ will be lost along with the rest of the resource.
 
 .PP
 \fB\-f\fP, \fB\-\-filename\fP=[]
-    Filename, directory, or URL to a file containing the resource to delete
+    Filename, directory, or URL to a file containing the resource to delete.
 
 .PP
 \fB\-\-grace\-period\fP=\-1
@@ -50,8 +50,16 @@ will be lost along with the rest of the resource.
     help for delete
 
 .PP
+\fB\-\-ignore\-not\-found\fP=false
+    Treat "resource not found" as a successful delete.
+
+.PP
 \fB\-l\fP, \fB\-\-selector\fP=""
-    Selector (label query) to filter on
+    Selector (label query) to filter on.
+
+.PP
+\fB\-\-timeout\fP=0
+    The length of time to wait before giving up on a delete, zero means determine a timeout from the size of the object
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
@@ -92,15 +100,15 @@ will be lost along with the rest of the resource.
     Path to the kubeconfig file to use for CLI requests.
 
 .PP
-\fB\-\-log\_backtrace\_at\fP=:0
+\fB\-\-log\-backtrace\-at\fP=:0
     when logging hits line file:N, emit a stack trace
 
 .PP
-\fB\-\-log\_dir\fP=""
+\fB\-\-log\-dir\fP=""
     If non\-empty, write log files in this directory
 
 .PP
-\fB\-\-log\_flush\_frequency\fP=5s
+\fB\-\-log\-flush\-frequency\fP=5s
     Maximum number of seconds between log flushes
 
 .PP

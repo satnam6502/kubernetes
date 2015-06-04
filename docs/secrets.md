@@ -18,7 +18,7 @@ This is an example of a simple secret, in json format:
   "kind": "Secret",
   "metadata" : {
     "name": "mysecret",
-    "namespace": "myns",
+    "namespace": "myns"
   },  
   "data": {
     "username": "dmFsdWUtMQ0K",
@@ -34,31 +34,30 @@ The values are arbitrary data, encoded using base64.
 This is an example of a pod that uses a secret, in json format:
 ```json
 {
-  "kind": "Pod",
-  "apiVersion": "v1beta3",
+ "apiVersion": "v1beta3",
+ "kind": "Pod",
   "metadata": {
-    "name": "mypod"
+    "name": "mypod",
+    "namespace": "myns"
   },
   "spec": {
-    "manifest": {
-      "containers": [{
-        "name": "c",
-        "image": "example/image",
-        "volumeMounts": [{
-          "name": "foo",
-          "mountPath": "/etc/foo",
-          "readOnly": true
-        }]
-      }],
-      "volumes": [{
+    "containers": [{
+      "name": "mypod",
+      "image": "redis",
+      "volumeMounts": [{
         "name": "foo",
-        "secret": {
-          "secretName": "mysecret"
-        }
+        "mountPath": "/etc/foo",
+        "readOnly": true
       }]
-    }
+    }],
+    "volumes": [{
+      "name": "foo",
+      "secret": {
+        "secretName": "mysecret"
+      }
+    }]
   }
-}]
+}
 ```
 
 ### Restrictions
@@ -73,6 +72,12 @@ Individual secrets are limited to 1MB in size.  This is to discourage creation
 of very large secrets which would exhaust apiserver and kubelet memory.
 However, creation of many smaller secrets could also exhaust memory.  More
 comprehensive limits on memory usage due to secrets is a planned feature.
+
+Kubelet only supports use of secrets for Pods it gets from the API server.
+This includes any pods created using kubectl, or indirectly via a replication
+controller.  It does not include pods created via the kubelets
+`--manifest-url` flag, its `--config` flag, or its REST API (these are
+not common ways to create pods.)
 
 ### Consuming Secret Values
 
@@ -90,8 +95,8 @@ Once a pod is created, its secret volumes will not change, even if the secret
 resource is modified.  To change the secret used, the original pod must be
 deleted, and a new pod (perhaps with an identical PodSpec) must be created.
 Therefore, updating a secret follows the same workflow as deploying a new
-container image.  The `kubectl rollingupdate` command can be used ([man
-page](kubectl-rollingupdate.md)).
+container image.  The `kubectl rolling-update` command can be used ([man
+page](kubectl_rolling-update.md)).
 
 The resourceVersion of the secret is not specified when it is referenced.
 Therefore, if a secret is updated at about the same time as pods are starting,

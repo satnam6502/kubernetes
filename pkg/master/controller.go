@@ -28,24 +28,30 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/namespace"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service"
 	servicecontroller "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service/ipallocator/controller"
+	portallocatorcontroller "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service/portallocator/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
 	"github.com/golang/glog"
 )
 
 // Controller is the controller manager for the core bootstrap Kubernetes controller
-// loops, which manage creating the "kubernetes" and "kubernetes-ro" services, the "default"
-// namespace, and provide the IP repair check on service PortalIPs
+// loops, which manage creating the "kubernetes" service, the "default"
+// namespace, and provide the IP repair check on service IPs
 type Controller struct {
 	NamespaceRegistry namespace.Registry
 	ServiceRegistry   service.Registry
-	ServiceIPRegistry service.IPRegistry
-	EndpointRegistry  endpoint.Registry
-	PortalNet         *net.IPNet
 	// TODO: MasterCount is yucky
 	MasterCount int
 
-	PortalIPInterval time.Duration
+	ServiceClusterIPRegistry service.RangeRegistry
+	ServiceClusterIPInterval time.Duration
+	ServiceClusterIPRange    *net.IPNet
+
+	ServiceNodePortRegistry service.RangeRegistry
+	ServiceNodePortInterval time.Duration
+	ServiceNodePortRange    util.PortRange
+
+	EndpointRegistry endpoint.Registry
 	EndpointInterval time.Duration
 
 	PublicIP net.IP
@@ -53,10 +59,6 @@ type Controller struct {
 	ServiceIP         net.IP
 	ServicePort       int
 	PublicServicePort int
-
-	ReadOnlyServiceIP         net.IP
-	ReadOnlyServicePort       int
-	PublicReadOnlyServicePort int
 
 	runner *util.Runner
 }
@@ -68,20 +70,21 @@ func (c *Controller) Start() {
 		return
 	}
 
-	repair := servicecontroller.NewRepair(c.PortalIPInterval, c.ServiceRegistry, c.PortalNet, c.ServiceIPRegistry)
+	repairClusterIPs := servicecontroller.NewRepair(c.ServiceClusterIPInterval, c.ServiceRegistry, c.ServiceClusterIPRange, c.ServiceClusterIPRegistry)
+	repairNodePorts := portallocatorcontroller.NewRepair(c.ServiceNodePortInterval, c.ServiceRegistry, c.ServiceNodePortRange, c.ServiceNodePortRegistry)
 
 	// run all of the controllers once prior to returning from Start.
-	if err := repair.RunOnce(); err != nil {
+	if err := repairClusterIPs.RunOnce(); err != nil {
 		glog.Errorf("Unable to perform initial IP allocation check: %v", err)
+	}
+	if err := repairNodePorts.RunOnce(); err != nil {
+		glog.Errorf("Unable to perform initial service nodePort check: %v", err)
 	}
 	if err := c.UpdateKubernetesService(); err != nil {
 		glog.Errorf("Unable to perform initial Kubernetes service initialization: %v", err)
 	}
-	if err := c.UpdateKubernetesROService(); err != nil {
-		glog.Errorf("Unable to perform initial Kubernetes RO service initialization: %v", err)
-	}
 
-	c.runner = util.NewRunner(c.RunKubernetesService, c.RunKubernetesROService, repair.RunUntil)
+	c.runner = util.NewRunner(c.RunKubernetesService, repairClusterIPs.RunUntil, repairNodePorts.RunUntil)
 	c.runner.Start()
 }
 
@@ -108,34 +111,6 @@ func (c *Controller) UpdateKubernetesService() error {
 			return err
 		}
 		if err := c.SetEndpoints("kubernetes", c.PublicIP, c.PublicServicePort); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// RunKubernetesROService periodically updates the kubernetes RO service
-func (c *Controller) RunKubernetesROService(ch chan struct{}) {
-	util.Until(func() {
-		if err := c.UpdateKubernetesROService(); err != nil {
-			util.HandleError(fmt.Errorf("unable to sync kubernetes RO service: %v", err))
-		}
-	}, c.EndpointInterval, ch)
-}
-
-// UpdateKubernetesROService attempts to update the default Kube read-only service.
-func (c *Controller) UpdateKubernetesROService() error {
-	// Update service & endpoint records.
-	// TODO: when it becomes possible to change this stuff,
-	// stop polling and start watching.
-	if err := c.CreateNamespaceIfNeeded(api.NamespaceDefault); err != nil {
-		return err
-	}
-	if c.ReadOnlyServiceIP != nil {
-		if err := c.CreateMasterServiceIfNeeded("kubernetes-ro", c.ReadOnlyServiceIP, c.ReadOnlyServicePort); err != nil {
-			return err
-		}
-		if err := c.SetEndpoints("kubernetes-ro", c.PublicIP, c.PublicReadOnlyServicePort); err != nil {
 			return err
 		}
 	}
@@ -180,7 +155,7 @@ func (c *Controller) CreateMasterServiceIfNeeded(serviceName string, serviceIP n
 			Ports: []api.ServicePort{{Port: servicePort, Protocol: api.ProtocolTCP}},
 			// maintained by this code, not by the pod selector
 			Selector:        nil,
-			PortalIP:        serviceIP.String(),
+			ClusterIP:       serviceIP.String(),
 			SessionAffinity: api.ServiceAffinityNone,
 		},
 	}
