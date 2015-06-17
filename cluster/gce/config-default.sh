@@ -17,10 +17,11 @@
 # TODO(jbeda): Provide a way to override project
 # gcloud multiplexing for shared GCE/GKE tests.
 GCLOUD=gcloud
-ZONE=${KUBE_GCE_ZONE:-us-central1-b}
-MASTER_SIZE=${MASTER_SIZE:-n1-standard-1}
+PROJEVT=kubernetes-scale
+ZONE=${KUBE_GCE_ZONE:-us-east1-a}
+MASTER_SIZE=${MASTER_SIZE:-n1-standard-4}
 MINION_SIZE=${MINION_SIZE:-n1-standard-1}
-NUM_MINIONS=${NUM_MINIONS:-4}
+NUM_MINIONS=${NUM_MINIONS:-100}
 MASTER_DISK_TYPE=pd-ssd
 MASTER_DISK_SIZE=${MASTER_DISK_SIZE:-20GB}
 MINION_DISK_TYPE=pd-standard
@@ -35,7 +36,7 @@ CONTAINER_RUNTIME=${KUBE_CONTAINER_RUNTIME:-docker}
 RKT_VERSION=${KUBE_RKT_VERSION:-0.5.5}
 
 NETWORK=${KUBE_GCE_NETWORK:-default}
-INSTANCE_PREFIX="${KUBE_GCE_INSTANCE_PREFIX:-kubernetes}"
+INSTANCE_PREFIX="${KUBE_GCE_INSTANCE_PREFIX:-es100}"
 MASTER_NAME="${INSTANCE_PREFIX}-master"
 MASTER_TAG="${INSTANCE_PREFIX}-master"
 MINION_TAG="${INSTANCE_PREFIX}-minion"
@@ -63,7 +64,7 @@ ENABLE_CLUSTER_MONITORING="${KUBE_ENABLE_CLUSTER_MONITORING:-googleinfluxdb}"
 
 # Optional: Enable node logging.
 ENABLE_NODE_LOGGING="${KUBE_ENABLE_NODE_LOGGING:-true}"
-LOGGING_DESTINATION="${KUBE_LOGGING_DESTINATION:-gcp}" # options: elasticsearch, gcp
+LOGGING_DESTINATION="${KUBE_LOGGING_DESTINATION:-elasticsearch}" # options: elasticsearch, gcp
 
 # Optional: When set to true, Elasticsearch and Kibana will be setup as part of the cluster bring up.
 ENABLE_CLUSTER_LOGGING="${KUBE_ENABLE_CLUSTER_LOGGING:-true}"
